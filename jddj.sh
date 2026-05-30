@@ -1848,14 +1848,34 @@ main_menu() {
 
 # ────────────────────────────────────────────────────────────────
 #  安装 jddj 快捷命令
+#  兼容 bash <(curl ...) 管道方式运行（$0 为 /proc/xxx/fd/pipe:...）
 # ────────────────────────────────────────────────────────────────
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
+
 install_self() {
-    local SCRIPT_PATH
-    SCRIPT_PATH="$(realpath "$0")"
-    if [[ "$SCRIPT_PATH" != "/usr/local/bin/jddj" ]]; then
-        cp "$SCRIPT_PATH" /usr/local/bin/jddj
-        chmod +x /usr/local/bin/jddj
-        log_success "已安装快捷命令，输入 jddj 即可进入管理界面"
+    local TARGET="/usr/local/bin/jddj"
+
+    # 已经是从 TARGET 运行，无需重装
+    [[ "$0" == "$TARGET" ]] && return
+
+    # 判断 $0 是否为真实可读文件（直接 bash jddj.sh 的情况）
+    if [[ -f "$0" && -r "$0" ]]; then
+        cp "$0" "$TARGET"
+        chmod +x "$TARGET"
+        log_success "已安装快捷命令 jddj"
+        return
+    fi
+
+    # 管道/进程替换方式运行（bash <(curl ...)），重新下载保存
+    log_info "检测到管道运行方式，正在下载脚本到 $TARGET ..."
+    if curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null; then
+        chmod +x "$TARGET"
+        log_success "已安装快捷命令 jddj，下次直接输入 jddj 进入管理界面"
+    elif wget -qO "$TARGET" "$JDDJ_REMOTE_URL" 2>/dev/null; then
+        chmod +x "$TARGET"
+        log_success "已安装快捷命令 jddj，下次直接输入 jddj 进入管理界面"
+    else
+        log_warn "快捷命令安装失败（网络问题），不影响当前使用"
     fi
 }
 
