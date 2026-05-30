@@ -781,6 +781,7 @@ ask_cert_paths() {
 
 # 1. VLESS TCP / XTLS-Vision
 build_vless_tcp() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — TCP / XTLS-Vision ───${NC}"
     local tag port uuid uname fc
@@ -796,7 +797,7 @@ build_vless_tcp() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "vless",
       "tag": "$tag",
@@ -817,6 +818,7 @@ EOF
 
 # 2. VLESS WebSocket
 build_vless_ws() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — WebSocket ───${NC}"
     local tag port uuid wspath
@@ -827,7 +829,7 @@ build_vless_ws() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "vless",
       "tag": "$tag",
@@ -854,6 +856,7 @@ EOF
 
 # 3. VLESS gRPC
 build_vless_grpc() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — gRPC ───${NC}"
     local tag port uuid svcname
@@ -864,7 +867,7 @@ build_vless_grpc() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "vless",
       "tag": "$tag",
@@ -890,6 +893,7 @@ EOF
 
 # 4. VLESS REALITY
 build_vless_reality() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — REALITY ───${NC}"
     local port uuid pk si sn
@@ -916,7 +920,7 @@ build_vless_reality() {
     echo -e "  server_name（REALITY 伪装域名，无需拥有，使用公网可访问的域名即可）:"
     ask_val sn "server_name" "www.microsoft.com"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "vless",
       "tag": "vless-reality-in",
@@ -939,6 +943,7 @@ EOF
 
 # 5. VMess TCP
 build_vmess_tcp() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VMess — TCP (TLS) ───${NC}"
     local tag port uuid
@@ -948,7 +953,7 @@ build_vmess_tcp() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "vmess",
       "tag": "$tag",
@@ -968,6 +973,7 @@ EOF
 
 # 6. VMess WebSocket
 build_vmess_ws() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VMess — WebSocket (TLS) ───${NC}"
     local tag port uuid wspath
@@ -978,7 +984,7 @@ build_vmess_ws() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "vmess",
       "tag": "$tag",
@@ -1003,6 +1009,7 @@ EOF
 
 # 7. Trojan TCP
 build_trojan_tcp() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Trojan — TCP (TLS) ───${NC}"
     local tag port pwd uname
@@ -1013,7 +1020,7 @@ build_trojan_tcp() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "trojan",
       "tag": "$tag",
@@ -1034,6 +1041,7 @@ EOF
 
 # 8. Trojan WebSocket
 build_trojan_ws() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Trojan — WebSocket (TLS) ───${NC}"
     local tag port pwd wspath
@@ -1044,7 +1052,7 @@ build_trojan_ws() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "trojan",
       "tag": "$tag",
@@ -1069,6 +1077,7 @@ EOF
 
 # 9. Shadowsocks 经典
 build_ss_classic() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks — 经典加密 ───${NC}"
     local tag port mc pwd
@@ -1084,7 +1093,7 @@ build_ss_classic() {
     echo -e "  ${GREEN}→ 加密方式: ${method}${NC}"
     ask_random pwd "password" "$(gen_password 20)"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "shadowsocks",
       "tag": "$tag",
@@ -1099,6 +1108,7 @@ EOF
 
 # 10. Shadowsocks 2022-256
 build_ss2022_256() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks 2022 — aes-256-gcm ───${NC}"
     local tag port spwd upwd uname
@@ -1108,7 +1118,7 @@ build_ss2022_256() {
     ask_random upwd "user password (base64-32B)"   "$(gen_ss2022_key_256)"
     ask_val   uname "用户名 name" "user-ss-2022-256"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "shadowsocks",
       "tag": "$tag",
@@ -1124,6 +1134,7 @@ EOF
 
 # 11. Shadowsocks 2022-128
 build_ss2022_128() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks 2022 — aes-128-gcm ───${NC}"
     local tag port spwd upwd
@@ -1132,7 +1143,7 @@ build_ss2022_128() {
     ask_random spwd "server password (base64-16B)" "$(gen_ss2022_key_128)"
     ask_random upwd "user password (base64-16B)"   "$(gen_ss2022_key_128)"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "shadowsocks",
       "tag": "$tag",
@@ -1148,6 +1159,7 @@ EOF
 
 # 12. Hysteria2
 build_hysteria2() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Hysteria2 ───${NC}"
     local tag port pwd obfspwd up dn
@@ -1160,7 +1172,7 @@ build_hysteria2() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "hysteria2",
       "tag": "$tag",
@@ -1184,6 +1196,7 @@ EOF
 
 # 13. TUIC v5
 build_tuic() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── TUIC v5 ───${NC}"
     local tag port uuid pwd
@@ -1194,7 +1207,7 @@ build_tuic() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "tuic",
       "tag": "$tag",
@@ -1218,6 +1231,7 @@ EOF
 
 # 14. AnyTLS
 build_anytls() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── AnyTLS ───${NC}"
     local tag port pwd
@@ -1227,7 +1241,7 @@ build_anytls() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "anytls",
       "tag": "$tag",
@@ -1247,6 +1261,7 @@ EOF
 
 # 15. NaïveProxy
 build_naive() {
+    local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── NaïveProxy ───${NC}"
     local tag port uname pwd
@@ -1257,7 +1272,7 @@ build_naive() {
     select_server_name "example.com"; local sn="$SELECTED_SN"
     ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    cat << EOF
+    cat > "$_jf" << EOF
     {
       "type": "naive",
       "tag": "$tag",
@@ -1307,29 +1322,36 @@ configure_singbox() {
     log_info "已选择 ${#PROTO_CHOICES[@]} 个协议，开始逐一配置..."
     echo ""
 
+    # 用临时文件收集 JSON，build_* 函数直接写终端（不被子shell捕获）
+    local TMP_JSON
+    TMP_JSON=$(mktemp /tmp/jddj_inbound_XXXXXX)
     local INBOUNDS_JSON=""
     local first=true
 
     for choice in "${PROTO_CHOICES[@]}"; do
-        local inbound_json=""
+        # 清空临时文件
+        > "$TMP_JSON"
         case $choice in
-            1)  inbound_json=$(build_vless_tcp) ;;
-            2)  inbound_json=$(build_vless_ws) ;;
-            3)  inbound_json=$(build_vless_grpc) ;;
-            4)  inbound_json=$(build_vless_reality) ;;
-            5)  inbound_json=$(build_vmess_tcp) ;;
-            6)  inbound_json=$(build_vmess_ws) ;;
-            7)  inbound_json=$(build_trojan_tcp) ;;
-            8)  inbound_json=$(build_trojan_ws) ;;
-            9)  inbound_json=$(build_ss_classic) ;;
-            10) inbound_json=$(build_ss2022_256) ;;
-            11) inbound_json=$(build_ss2022_128) ;;
-            12) inbound_json=$(build_hysteria2) ;;
-            13) inbound_json=$(build_tuic) ;;
-            14) inbound_json=$(build_anytls) ;;
-            15) inbound_json=$(build_naive) ;;
+            1)  build_vless_tcp    "$TMP_JSON" ;;
+            2)  build_vless_ws     "$TMP_JSON" ;;
+            3)  build_vless_grpc   "$TMP_JSON" ;;
+            4)  build_vless_reality "$TMP_JSON" ;;
+            5)  build_vmess_tcp    "$TMP_JSON" ;;
+            6)  build_vmess_ws     "$TMP_JSON" ;;
+            7)  build_trojan_tcp   "$TMP_JSON" ;;
+            8)  build_trojan_ws    "$TMP_JSON" ;;
+            9)  build_ss_classic   "$TMP_JSON" ;;
+            10) build_ss2022_256   "$TMP_JSON" ;;
+            11) build_ss2022_128   "$TMP_JSON" ;;
+            12) build_hysteria2    "$TMP_JSON" ;;
+            13) build_tuic         "$TMP_JSON" ;;
+            14) build_anytls       "$TMP_JSON" ;;
+            15) build_naive        "$TMP_JSON" ;;
             *)  log_warn "未知选项: $choice，跳过"; continue ;;
         esac
+        local inbound_json
+        inbound_json=$(cat "$TMP_JSON")
+        if [[ -z "$inbound_json" ]]; then continue; fi
         if $first; then
             INBOUNDS_JSON="$inbound_json"
             first=false
@@ -1337,6 +1359,7 @@ configure_singbox() {
             INBOUNDS_JSON="$INBOUNDS_JSON,$inbound_json"
         fi
     done
+    rm -f "$TMP_JSON"
 
     # 生成完整 config.json
     mkdir -p /etc/sing-box
