@@ -93,26 +93,37 @@ gen_naive_username() {
 }
 
 # ────────────────────────────────────────────────────────────────
+#  旧 ask() 保留给 ask_cert_paths 兼容调用（内部用 ask_val 实现）
+# ────────────────────────────────────────────────────────────────
+ask() {
+    local prompt="$1" default="$2"
+    ask_val REPLY_VAL "$prompt" "$default"
+}
+
+# ────────────────────────────────────────────────────────────────
 #  读取已安装证书域名
 # ────────────────────────────────────────────────────────────────
 get_cert_domains() {
     local domains=()
-    # acme.sh 证书
+    # acme.sh 证书：扫描 ~/.acme.sh/<domain>/<domain>.cer
     if [[ -d /root/.acme.sh ]]; then
-        while IFS= read -r -d '' conf; do
+        while IFS= read -r dir; do
             local d
-            d=$(basename "$(dirname "$conf")")
-            [[ "$d" != "__INTERACT__" ]] && domains+=("$d")
-        done < <(find /root/.acme.sh -name "*.conf" -print0 2>/dev/null)
+            d=$(basename "$dir")
+            [[ -z "$d" || "$d" == "__INTERACT__" || "$d" == "ca" || "$d" == "account.conf" ]] && continue
+            [[ -d "$dir" ]] && domains+=("$d")
+        done < <(find /root/.acme.sh -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
-    # /etc/ssl/certs 下的 crt 文件
-    while IFS= read -r -d '' crt; do
+    # /etc/ssl/private 和常见路径下的证书文件（读取 CN）
+    while IFS= read -r crt; do
+        [[ -z "$crt" ]] && continue
         local cn
-        cn=$(openssl x509 -in "$crt" -noout -subject 2>/dev/null | sed -n 's/.*CN\s*=\s*\([^,/]*\).*/\1/p')
+        cn=$(openssl x509 -in "$crt" -noout -subject 2>/dev/null | grep -oP '(?<=CN\s=\s)[^,/]+' | head -1)
         [[ -n "$cn" ]] && domains+=("$cn")
-    done < <(find /etc/ssl/certs /etc/nginx/ssl /etc/ssl/private -name "*.crt" -o -name "*.cer" -o -name "*.pem" 2>/dev/null | head -20 | tr '\n' '\0')
-    # 去重
-    printf '%s\n' "${domains[@]}" | sort -u
+    done < <(find /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl 2>/dev/null         \( -name "*.crt" -o -name "fullchain.cer" -o -name "*.pem" \) | head -20)
+    # 去重并过滤系统自带的无效条目
+    printf '%s
+' "${domains[@]}" | sort -u | grep -v '^\*' | grep '\.' || true
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -670,53 +681,120 @@ EOF
 #  ══════════════════════════════════════════════════════════════
 # ────────────────────────────────────────────────────────────────
 
-# 选择 server_name（读取已装证书）
+# 选择 server_name（优先读取已装证书，未找到则手动输入）
 select_server_name() {
     local default_sn="${1:-example.com}"
     echo ""
-    echo "  正在读取已安装证书..."
     local domains=()
-    mapfile -t domains < <(get_cert_domains)
+    mapfile -t domains < <(get_cert_domains 2>/dev/null)
 
     if [[ ${#domains[@]} -gt 0 ]]; then
-        echo "  已找到以下证书域名:"
+        echo -e "  \033[0;36m已检测到以下证书域名：\033[0m"
         for i in "${!domains[@]}"; do
             echo "    $((i+1))) ${domains[$i]}"
         done
-        echo "    $((${#domains[@]}+1))) 手动输入"
-        read -rp "  请选择 server_name: " sn_choice
-        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
+        local manual_idx=$(( ${#domains[@]} + 1 ))
+        echo "    ${manual_idx}) 手动输入"
+        echo ""
+        local sn_choice
+        read -rp "  请选择 server_name（输入编号）: " sn_choice
+        sn_choice="${sn_choice:-1}"
+        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
             SELECTED_SN="${domains[$((sn_choice-1))]}"
+            echo -e "  \033[0;32m→ 使用证书域名: ${SELECTED_SN}\033[0m"
         else
-            read -rp "  请输入 server_name: " SELECTED_SN
+            read -rp "  请手动输入 server_name（默认 ${default_sn}）: " SELECTED_SN
+            SELECTED_SN="${SELECTED_SN:-$default_sn}"
+            echo -e "  \033[0;32m→ server_name: ${SELECTED_SN}\033[0m"
         fi
     else
-        read -rp "  请输入 server_name（默认 $default_sn）: " SELECTED_SN
+        echo "  （未检测到已安装证书，请手动输入）"
+        read -rp "  请输入 server_name（默认 ${default_sn}）: " SELECTED_SN
         SELECTED_SN="${SELECTED_SN:-$default_sn}"
+        echo -e "  \033[0;32m→ server_name: ${SELECTED_SN}\033[0m"
     fi
-    echo "  → server_name: $SELECTED_SN"
 }
 
-# 构建 inbound JSON 片段
+# ────────────────────────────────────────────────────────────────
+#  通用输入函数：打印提示、显示默认值、回车后回显实际使用值
+#  用法: ask_val <变量名> <提示文字> <默认值>
+#  结果存入变量名中
+# ────────────────────────────────────────────────────────────────
+ask_val() {
+    local varname="$1"
+    local prompt="$2"
+    local default="$3"
+    local input
+    read -rp "  ${prompt} [${default}]: " input
+    local result="${input:-$default}"
+    # 回车使用默认时，绿色回显实际值
+    if [[ -z "$input" ]]; then
+        echo -e "  ${GREEN}→ ${result}${NC}"
+    fi
+    # 将结果写入调用方指定的变量
+    printf -v "$varname" '%s' "$result"
+}
+
+# 随机值输入：先显示随机值供参考，回车使用，或手动覆盖
+# 用法: ask_random <变量名> <提示文字> <随机值>
+ask_random() {
+    local varname="$1"
+    local prompt="$2"
+    local randval="$3"
+    local input
+    echo -e "  ${YELLOW}${prompt}${NC}"
+    echo -e "  随机生成: ${CYAN}${randval}${NC}"
+    read -rp "  直接回车使用随机值，或输入自定义值: " input
+    local result="${input:-$randval}"
+    echo -e "  ${GREEN}→ ${result}${NC}"
+    printf -v "$varname" '%s' "$result"
+}
+
+# 询问证书路径（server_name 已选定后调用，结果存入 CERT_PATH / KEY_PATH）
+ask_cert_paths() {
+    local sn="$1"
+    # 尝试自动定位证书文件
+    local auto_cert="" auto_key=""
+    for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
+        [[ -f "$d/${sn}.crt"       ]] && auto_cert="$d/${sn}.crt"       && break
+        [[ -f "$d/fullchain.cer"   ]] && auto_cert="$d/fullchain.cer"   && break
+        [[ -f "$d/${sn}/fullchain.cer" ]] && auto_cert="$d/${sn}/fullchain.cer" && break
+    done
+    for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
+        [[ -f "$d/${sn}.key"   ]] && auto_key="$d/${sn}.key"   && break
+        [[ -f "$d/private.key" ]] && auto_key="$d/private.key" && break
+    done
+    # acme.sh 路径
+    [[ -z "$auto_cert" && -f "/root/.acme.sh/${sn}/fullchain.cer" ]] && auto_cert="/root/.acme.sh/${sn}/fullchain.cer"
+    [[ -z "$auto_key"  && -f "/root/.acme.sh/${sn}/${sn}.key"     ]] && auto_key="/root/.acme.sh/${sn}/${sn}.key"
+
+    local default_cert="${auto_cert:-/etc/ssl/private/${sn}.crt}"
+    local default_key="${auto_key:-/etc/ssl/private/${sn}.key}"
+
+    ask_val CERT_PATH "cert_path" "$default_cert"
+    ask_val KEY_PATH  "key_path"  "$default_key"
+}
+
+# ────────────────────────────────────────────────────────────────
+#  构建 inbound JSON 片段
+# ────────────────────────────────────────────────────────────────
+
 # 1. VLESS TCP / XTLS-Vision
 build_vless_tcp() {
     echo ""
     echo -e "${CYAN}  ─── VLESS — TCP / XTLS-Vision ───${NC}"
-    read -rp "  tag [vless-tcp-in]: " tag; tag="${tag:-vless-tcp-in}"
-    read -rp "  listen_port [1443]: " port; port="${port:-1443}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
-    read -rp "  用户名 name [user-vless-tcp]: " uname; uname="${uname:-user-vless-tcp}"
-    echo "  flow: 1) xtls-rprx-vision [默认]  2) 无（普通 TCP）"
-    read -rp "  请选择: " fc; fc=${fc:-1}
-    local flow; [[ "$fc" == "1" ]] && flow='"flow": "xtls-rprx-vision"' || flow='"flow": ""'
-    select_server_name "example.com"
-    local sn="$SELECTED_SN"
-
-    echo ""
-    echo "  证书文件路径（默认 /etc/ssl/certs/${sn}.crt）:"
-    read -rp "  cert_path: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    local tag port uuid uname fc
+    ask_val   tag   "tag"       "vless-tcp-in"
+    ask_val   port  "listen_port" "1443"
+    ask_random uuid "uuid" "$(gen_uuid)"
+    ask_val   uname "用户名 name" "user-vless-tcp"
+    echo -e "  flow:"
+    echo    "    1) xtls-rprx-vision [默认]"
+    echo    "    2) 无（普通 TCP）"
+    ask_val fc "请选择" "1"
+    local flow; [[ "$fc" == "2" ]] && flow='"flow": ""' || flow='"flow": "xtls-rprx-vision"'
+    select_server_name "example.com"; local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -741,14 +819,13 @@ EOF
 build_vless_ws() {
     echo ""
     echo -e "${CYAN}  ─── VLESS — WebSocket ───${NC}"
-    read -rp "  tag [vless-ws-in]: " tag; tag="${tag:-vless-ws-in}"
-    read -rp "  listen_port [8443]: " port; port="${port:-8443}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
-    read -rp "  ws path [/vless-ws]: " wspath; wspath="${wspath:-/vless-ws}"
+    local tag port uuid wspath
+    ask_val   tag    "tag"         "vless-ws-in"
+    ask_val   port   "listen_port" "8443"
+    ask_random uuid  "uuid"        "$(gen_uuid)"
+    ask_val   wspath "ws path"     "/vless-ws"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -779,14 +856,13 @@ EOF
 build_vless_grpc() {
     echo ""
     echo -e "${CYAN}  ─── VLESS — gRPC ───${NC}"
-    read -rp "  tag [vless-grpc-in]: " tag; tag="${tag:-vless-grpc-in}"
-    read -rp "  listen_port [8444]: " port; port="${port:-8444}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
-    read -rp "  service_name [vless-grpc-service]: " svcname; svcname="${svcname:-vless-grpc-service}"
+    local tag port uuid svcname
+    ask_val   tag     "tag"          "vless-grpc-in"
+    ask_val   port    "listen_port"  "8444"
+    ask_random uuid   "uuid"         "$(gen_uuid)"
+    ask_val   svcname "service_name" "vless-grpc-service"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -816,28 +892,29 @@ EOF
 build_vless_reality() {
     echo ""
     echo -e "${CYAN}  ─── VLESS — REALITY ───${NC}"
-    read -rp "  listen_port [443]: " port; port="${port:-443}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
+    local port uuid pk si sn
 
-    echo "  生成 REALITY 密钥对..."
-    local keypair_out
-    keypair_out=$(gen_reality_keypair)
-    local privkey pubkey sid
-    privkey=$(echo "$keypair_out" | grep -i private | awk '{print $NF}')
-    pubkey=$(echo "$keypair_out"  | grep -i public  | awk '{print $NF}')
-    sid=$(gen_short_id)
-
-    echo "  PrivateKey: $privkey"
-    echo "  PublicKey:  $pubkey （客户端填写）"
-    echo "  ShortId:    $sid"
-    read -rp "  private_key [随机: $privkey]: " pk; pk="${pk:-$privkey}"
-    read -rp "  short_id [随机: $sid]: " si; si="${si:-$sid}"
-    read -rp "  server_name（伪装域名）[www.microsoft.com]: " sn; sn="${sn:-www.microsoft.com}"
+    ask_val port "listen_port" "443"
+    ask_random uuid "uuid" "$(gen_uuid)"
 
     echo ""
-    echo "  ⚠  客户端 public_key: $pubkey"
-    echo "  ⚠  请保存此 public_key 用于客户端配置"
+    echo -e "  ${YELLOW}正在生成 REALITY 密钥对...${NC}"
+    local keypair_out privkey pubkey sid_rand
+    keypair_out=$(gen_reality_keypair)
+    privkey=$(echo "$keypair_out" | grep -i private | awk '{print $NF}')
+    pubkey=$(echo  "$keypair_out" | grep -i public  | awk '{print $NF}')
+    sid_rand=$(gen_short_id)
+
+    ask_random pk  "private_key" "$privkey"
+    ask_random si  "short_id"    "$sid_rand"
+
+    echo ""
+    echo -e "  ${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
+    echo -e "  ${BOLD}${CYAN}  $pubkey${NC}"
+    echo ""
+
+    echo -e "  server_name（REALITY 伪装域名，无需拥有，使用公网可访问的域名即可）:"
+    ask_val sn "server_name" "www.microsoft.com"
 
     cat << EOF
     {
@@ -864,13 +941,12 @@ EOF
 build_vmess_tcp() {
     echo ""
     echo -e "${CYAN}  ─── VMess — TCP (TLS) ───${NC}"
-    read -rp "  tag [vmess-tcp-in]: " tag; tag="${tag:-vmess-tcp-in}"
-    read -rp "  listen_port [9443]: " port; port="${port:-9443}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
+    local tag port uuid
+    ask_val   tag  "tag"         "vmess-tcp-in"
+    ask_val   port "listen_port" "9443"
+    ask_random uuid "uuid"       "$(gen_uuid)"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -894,14 +970,13 @@ EOF
 build_vmess_ws() {
     echo ""
     echo -e "${CYAN}  ─── VMess — WebSocket (TLS) ───${NC}"
-    read -rp "  tag [vmess-ws-in]: " tag; tag="${tag:-vmess-ws-in}"
-    read -rp "  listen_port [9444]: " port; port="${port:-9444}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
-    read -rp "  ws path [/vmess-ws]: " wspath; wspath="${wspath:-/vmess-ws}"
+    local tag port uuid wspath
+    ask_val   tag    "tag"         "vmess-ws-in"
+    ask_val   port   "listen_port" "9444"
+    ask_random uuid  "uuid"        "$(gen_uuid)"
+    ask_val   wspath "ws path"     "/vmess-ws"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -930,14 +1005,13 @@ EOF
 build_trojan_tcp() {
     echo ""
     echo -e "${CYAN}  ─── Trojan — TCP (TLS) ───${NC}"
-    read -rp "  tag [trojan-tcp-in]: " tag; tag="${tag:-trojan-tcp-in}"
-    read -rp "  listen_port [10443]: " port; port="${port:-10443}"
-    local pwd; pwd=$(gen_password 20)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
-    read -rp "  用户名 name [user-trojan-tcp]: " uname; uname="${uname:-user-trojan-tcp}"
+    local tag port pwd uname
+    ask_val   tag   "tag"          "trojan-tcp-in"
+    ask_val   port  "listen_port"  "10443"
+    ask_random pwd  "password"     "$(gen_password 20)"
+    ask_val   uname "用户名 name"  "user-trojan-tcp"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -962,14 +1036,13 @@ EOF
 build_trojan_ws() {
     echo ""
     echo -e "${CYAN}  ─── Trojan — WebSocket (TLS) ───${NC}"
-    read -rp "  tag [trojan-ws-in]: " tag; tag="${tag:-trojan-ws-in}"
-    read -rp "  listen_port [10444]: " port; port="${port:-10444}"
-    local pwd; pwd=$(gen_password 20)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
-    read -rp "  ws path [/trojan-ws]: " wspath; wspath="${wspath:-/trojan-ws}"
+    local tag port pwd wspath
+    ask_val   tag    "tag"         "trojan-ws-in"
+    ask_val   port   "listen_port" "10444"
+    ask_random pwd   "password"    "$(gen_password 20)"
+    ask_val   wspath "ws path"     "/trojan-ws"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -998,14 +1071,18 @@ EOF
 build_ss_classic() {
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks — 经典加密 ───${NC}"
-    read -rp "  tag [ss-aes-in]: " tag; tag="${tag:-ss-aes-in}"
-    read -rp "  listen_port [11001]: " port; port="${port:-11001}"
-    echo "  加密方式: 1) aes-256-gcm [默认]  2) aes-128-gcm  3) chacha20-ietf-poly1305"
-    read -rp "  请选择: " mc; mc=${mc:-1}
+    local tag port mc pwd
+    ask_val tag  "tag"         "ss-aes-in"
+    ask_val port "listen_port" "11001"
+    echo -e "  加密方式:"
+    echo    "    1) aes-256-gcm [默认]"
+    echo    "    2) aes-128-gcm"
+    echo    "    3) chacha20-ietf-poly1305"
+    ask_val mc "请选择" "1"
     local method
     case $mc in 2) method="aes-128-gcm" ;; 3) method="chacha20-ietf-poly1305" ;; *) method="aes-256-gcm" ;; esac
-    local pwd; pwd=$(gen_password 20)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
+    echo -e "  ${GREEN}→ 加密方式: ${method}${NC}"
+    ask_random pwd "password" "$(gen_password 20)"
 
     cat << EOF
     {
@@ -1024,13 +1101,12 @@ EOF
 build_ss2022_256() {
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks 2022 — aes-256-gcm ───${NC}"
-    read -rp "  tag [ss-2022-256-in]: " tag; tag="${tag:-ss-2022-256-in}"
-    read -rp "  listen_port [11002]: " port; port="${port:-11002}"
-    local spwd; spwd=$(gen_ss2022_key_256)
-    local upwd; upwd=$(gen_ss2022_key_256)
-    read -rp "  server password [随机 base64-32B]: " sp; spwd="${sp:-$spwd}"
-    read -rp "  user password [随机 base64-32B]: " up; upwd="${up:-$upwd}"
-    read -rp "  用户名 name [user-ss-2022-256]: " uname; uname="${uname:-user-ss-2022-256}"
+    local tag port spwd upwd uname
+    ask_val   tag   "tag"         "ss-2022-256-in"
+    ask_val   port  "listen_port" "11002"
+    ask_random spwd "server password (base64-32B)" "$(gen_ss2022_key_256)"
+    ask_random upwd "user password (base64-32B)"   "$(gen_ss2022_key_256)"
+    ask_val   uname "用户名 name" "user-ss-2022-256"
 
     cat << EOF
     {
@@ -1050,12 +1126,11 @@ EOF
 build_ss2022_128() {
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks 2022 — aes-128-gcm ───${NC}"
-    read -rp "  tag [ss-2022-128-in]: " tag; tag="${tag:-ss-2022-128-in}"
-    read -rp "  listen_port [11003]: " port; port="${port:-11003}"
-    local spwd; spwd=$(gen_ss2022_key_128)
-    local upwd; upwd=$(gen_ss2022_key_128)
-    read -rp "  server password [随机 base64-16B]: " sp; spwd="${sp:-$spwd}"
-    read -rp "  user password [随机 base64-16B]: " up; upwd="${up:-$upwd}"
+    local tag port spwd upwd
+    ask_val   tag  "tag"         "ss-2022-128-in"
+    ask_val   port "listen_port" "11003"
+    ask_random spwd "server password (base64-16B)" "$(gen_ss2022_key_128)"
+    ask_random upwd "user password (base64-16B)"   "$(gen_ss2022_key_128)"
 
     cat << EOF
     {
@@ -1075,17 +1150,15 @@ EOF
 build_hysteria2() {
     echo ""
     echo -e "${CYAN}  ─── Hysteria2 ───${NC}"
-    read -rp "  tag [hysteria2-in]: " tag; tag="${tag:-hysteria2-in}"
-    read -rp "  listen_port [12443]: " port; port="${port:-12443}"
-    local pwd; pwd=$(gen_password 24)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
-    local obfspwd; obfspwd=$(gen_password 16)
-    read -rp "  obfs password [随机: $obfspwd]: " op; obfspwd="${op:-$obfspwd}"
-    read -rp "  up_mbps [200]: " up; up="${up:-200}"
-    read -rp "  down_mbps [100]: " dn; dn="${dn:-100}"
+    local tag port pwd obfspwd up dn
+    ask_val   tag     "tag"          "hysteria2-in"
+    ask_val   port    "listen_port"  "12443"
+    ask_random pwd    "password"     "$(gen_password 24)"
+    ask_random obfspwd "obfs password" "$(gen_password 16)"
+    ask_val   up      "up_mbps"      "200"
+    ask_val   dn      "down_mbps"    "100"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -1113,15 +1186,13 @@ EOF
 build_tuic() {
     echo ""
     echo -e "${CYAN}  ─── TUIC v5 ───${NC}"
-    read -rp "  tag [tuic-in]: " tag; tag="${tag:-tuic-in}"
-    read -rp "  listen_port [13443]: " port; port="${port:-13443}"
-    local uuid; uuid=$(gen_uuid)
-    read -rp "  uuid [随机: $uuid]: " u; uuid="${u:-$uuid}"
-    local pwd; pwd=$(gen_password 20)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
+    local tag port uuid pwd
+    ask_val   tag  "tag"         "tuic-in"
+    ask_val   port "listen_port" "13443"
+    ask_random uuid "uuid"       "$(gen_uuid)"
+    ask_random pwd  "password"   "$(gen_password 20)"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -1149,13 +1220,12 @@ EOF
 build_anytls() {
     echo ""
     echo -e "${CYAN}  ─── AnyTLS ───${NC}"
-    read -rp "  tag [anytls-in]: " tag; tag="${tag:-anytls-in}"
-    read -rp "  listen_port [14443]: " port; port="${port:-14443}"
-    local pwd; pwd=$(gen_password 24)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
+    local tag port pwd
+    ask_val   tag  "tag"         "anytls-in"
+    ask_val   port "listen_port" "14443"
+    ask_random pwd "password"    "$(gen_password 24)"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
@@ -1179,15 +1249,13 @@ EOF
 build_naive() {
     echo ""
     echo -e "${CYAN}  ─── NaïveProxy ───${NC}"
-    read -rp "  tag [naive-in]: " tag; tag="${tag:-naive-in}"
-    read -rp "  listen_port [15443]: " port; port="${port:-15443}"
-    local uname; uname=$(gen_naive_username)
-    read -rp "  username [随机: $uname]: " u; uname="${u:-$uname}"
-    local pwd; pwd=$(gen_password 20)
-    read -rp "  password [随机: $pwd]: " p; pwd="${p:-$pwd}"
+    local tag port uname pwd
+    ask_val   tag   "tag"         "naive-in"
+    ask_val   port  "listen_port" "15443"
+    ask_random uname "username"   "$(gen_naive_username)"
+    ask_random pwd   "password"   "$(gen_password 20)"
     select_server_name "example.com"; local sn="$SELECTED_SN"
-    read -rp "  cert_path [/etc/ssl/certs/${sn}.crt]: " cp; cp="${cp:-/etc/ssl/certs/${sn}.crt}"
-    read -rp "  key_path [/etc/ssl/private/${sn}.key]: " kp; kp="${kp:-/etc/ssl/private/${sn}.key}"
+    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat << EOF
     {
