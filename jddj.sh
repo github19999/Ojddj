@@ -1856,16 +1856,7 @@ install_self() {
     # 已经是从 TARGET 运行，无需重装
     [[ "$0" == "$TARGET" ]] && return
 
-    # 判断 $0 是否为真实可读文件（直接 bash jddj.sh 的情况）
-    if [[ -f "$0" && -r "$0" ]]; then
-        cp "$0" "$TARGET"
-        chmod +x "$TARGET"
-        log_success "已安装快捷命令 jddj"
-        return
-    fi
-
-    # 管道/进程替换方式运行（bash <(curl ...)），重新下载保存
-    log_info "检测到管道运行方式，正在下载脚本到 $TARGET ..."
+    # 统一从远端下载保存，避免 bash <(curl...) 管道方式下 $0 不是真实文件的问题
     if curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null; then
         chmod +x "$TARGET"
         log_success "已安装快捷命令 jddj，下次直接输入 jddj 进入管理界面"
