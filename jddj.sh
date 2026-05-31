@@ -533,10 +533,21 @@ deploy_ssl() {
     [[ "$PKG_MANAGER" == "apt" ]] && packages="curl wget socat cron openssl ca-certificates" || packages="curl wget socat cronie openssl ca-certificates"
     $PKG_MANAGER install -y $packages >/dev/null 2>&1 || true
 
+    # 确保 cron 服务真正启动（acme.sh 安装时会检测，未运行则中止）
+    local cron_running=false
     if [[ "$PKG_MANAGER" == "apt" ]]; then
-        systemctl enable cron >/dev/null 2>&1 && systemctl start cron >/dev/null 2>&1 || true
+        systemctl enable cron >/dev/null 2>&1 || true
+        systemctl start  cron >/dev/null 2>&1 || true
+        systemctl is-active --quiet cron 2>/dev/null && cron_running=true
     else
-        systemctl enable crond >/dev/null 2>&1 && systemctl start crond >/dev/null 2>&1 || true
+        systemctl enable crond >/dev/null 2>&1 || true
+        systemctl start  crond >/dev/null 2>&1 || true
+        systemctl is-active --quiet crond 2>/dev/null && cron_running=true
+    fi
+    if $cron_running; then
+        log_success "cron 服务已运行"
+    else
+        log_warn "cron 服务启动失败，acme.sh 将以 --force 模式跳过 cron 检查"
     fi
 
     echo ""
@@ -570,16 +581,18 @@ deploy_ssl() {
 
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        local acme_wrapper="/tmp/acme_wrapper_$$.sh"
-        cat > "$acme_wrapper" << 'ACME_WRAPPER'
-#!/bin/bash
-curl https://get.acme.sh | sh
-ACME_WRAPPER
-        bash "$acme_wrapper"
+        # 先下载安装脚本到本地，再传 --force 执行
+        # --force 作用：当 cron 未运行时跳过中止，改为后续手动补 crontab
+        local acme_installer="/tmp/acme_install_$$.sh"
+        if ! curl -fsSL https://get.acme.sh -o "$acme_installer" 2>/dev/null &&            ! wget -qO  "$acme_installer" https://get.acme.sh 2>/dev/null; then
+            log_error "acme.sh 安装包下载失败，请检查网络"
+            return 1
+        fi
+        bash "$acme_installer" --force
         local acme_ret=$?
-        rm -f "$acme_wrapper"
+        rm -f "$acme_installer"
         if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
-            log_error "acme.sh 安装失败"
+            log_error "acme.sh 安装失败（退出码: $acme_ret）"
             return 1
         fi
     else
