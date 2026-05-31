@@ -147,7 +147,10 @@ get_cert_domains() {
         while IFS= read -r dir; do
             local d
             d=$(basename "$dir")
+            # 跳过系统目录和非域名条目
             [[ -z "$d" || "$d" == "__INTERACT__" || "$d" == "ca" || "$d" == "account.conf" ]] && continue
+            # 跳过 acme.sh ECC 证书目录（格式为 domain_ecc，是同域名的副本）
+            [[ "$d" == *_ecc ]] && continue
             [[ -d "$dir" ]] && domains+=("$d")
         done < <(find /root/.acme.sh -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
@@ -158,6 +161,7 @@ get_cert_domains() {
         [[ -n "$cn" ]] && domains+=("$cn")
     done < <(find /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl 2>/dev/null \
         \( -name "*.crt" -o -name "fullchain.cer" -o -name "*.pem" \) | head -20)
+    # 去重、过滤通配符、过滤无点号条目
     printf '%s\n' "${domains[@]}" | sort -u | grep -v '^\*' | grep '\.' || true
 }
 
@@ -786,7 +790,7 @@ install_singbox() {
             ;;
     esac
 
-    mkdir -p /etc/sing-box /var/log/sing-box
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
 
     if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
         cat > /etc/systemd/system/sing-box.service << 'EOF'
@@ -1005,16 +1009,19 @@ build_vless_reality() {
     echo -e "  ${BOLD}${CYAN}    $pubkey${NC}"
     echo ""
 
+    # server_name：REALITY 伪装域名，不需要拥有，填公网可访问的 TLS 站点
     echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
-    echo -e "    说明：不需要拥有该域名，使用公网可访问的 TLS 网站即可"
-    echo -e "    例如：www.microsoft.com / www.apple.com / www.amazon.com"
+    echo -e "    不需要拥有该域名，填公网可访问的 TLS 网站即可"
+    echo -e "    例如: www.microsoft.com  www.apple.com  www.amazon.com"
     ask_val sn "server_name" "www.microsoft.com"
 
-    echo -e "  ${CYAN}◆ handshake 目标（REALITY 握手转发地址）${NC}"
-    echo -e "    通常填写与 server_name 对应的真实服务器 IP，或本地端口转发"
-    echo -e "    若不确定，可保持默认（会连接 ${sn}:443 做握手）"
-    ask_val hs_server "handshake server（IP 或域名）" "$sn"
-    ask_val hs_port   "handshake port" "443"
+    # handshake：固定默认 127.0.0.1:8001（对应本地 nginx/caddy 回环监听）
+    # 若无本地 Web 服务，也可填 server_name 对应的真实 IP
+    echo -e "  ${CYAN}◆ handshake 握手转发目标${NC}"
+    echo -e "    默认 127.0.0.1:8001（本机回环，适合同时运行 Web 服务的场景）"
+    echo -e "    若无本地 Web 服务，可改为 ${sn}:443 直连握手"
+    ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
+    ask_val hs_port   "handshake port" "8001"
 
     cat > "$_jf" << EOF
     {
@@ -1028,7 +1035,10 @@ build_vless_reality() {
         "server_name": "$sn",
         "reality": {
           "enabled": true,
-          "handshake": {"server": "$hs_server", "server_port": $hs_port},
+          "handshake": {
+            "server": "$hs_server",
+            "server_port": $hs_port
+          },
           "private_key": "$pk",
           "short_id": ["$si"]
         }
@@ -1520,7 +1530,7 @@ configure_singbox() {
     done
     rm -f "$TMP_JSON"
 
-    mkdir -p /etc/sing-box
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
     cat > /etc/sing-box/config.json << EOF
 {
   "log": {
@@ -1533,11 +1543,18 @@ configure_singbox() {
     "servers": [
       {
         "tag": "dns-local",
-        "address": "223.5.5.5",
+        "address": "udp://223.5.5.5",
+        "detour": "direct"
+      },
+      {
+        "tag": "dns-remote",
+        "address": "udp://8.8.8.8",
         "detour": "direct"
       }
     ],
-    "final": "dns-local"
+    "rules": [],
+    "final": "dns-local",
+    "independent_cache": true
   },
 
   "inbounds": [
@@ -1999,7 +2016,7 @@ run_all() {
     echo ""
     echo -e "${BLUE}── 步骤 3：安装 sing-box ──${NC}"
     bash <(curl -fsSL https://sing-box.app/deb-install.sh) 2>/dev/null || true
-    mkdir -p /etc/sing-box /var/log/sing-box
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
 
     echo ""
     echo -e "${BLUE}── 步骤 4：配置 sing-box ──${NC}"
