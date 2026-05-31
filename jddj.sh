@@ -76,7 +76,6 @@ gen_reality_keypair() {
     if command -v sing-box &>/dev/null; then
         sing-box generate reality-keypair 2>/dev/null
     else
-        # 用 openssl 模拟生成（Ed25519 base64url）
         local privkey pubkey
         privkey=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=')
         pubkey=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=')
@@ -88,13 +87,52 @@ gen_reality_keypair() {
 gen_short_id() { openssl rand -hex 4; }
 
 gen_naive_username() {
-    # NaïveProxy 用户名：只含字母数字，8-16位
     tr -dc 'a-z0-9' </dev/urandom | head -c 12 2>/dev/null || echo "naiveuser$(shuf -i 1000-9999 -n1)"
 }
 
 # ────────────────────────────────────────────────────────────────
-#  旧 ask() 保留给 ask_cert_paths 兼容调用（内部用 ask_val 实现）
+#  通用输入函数
+#  ask_val  <变量名> <字段说明> <默认值>
+#  ask_random <变量名> <字段说明> <随机值>
+#
+#  修复要点：
+#  1. 每次输入前先打印「字段说明 → 随机/默认值」让用户明确看到
+#  2. 用户回车后，无论是否修改，都打印绿色「✓ 实际使用值」
+#  3. 不依赖 [[ -z "$input" ]] 判断（防止某些终端 read 行为异常）
 # ────────────────────────────────────────────────────────────────
+ask_val() {
+    local varname="$1"
+    local label="$2"
+    local default="$3"
+    local input result
+
+    # 明确显示字段说明 + 默认值（独占一行，避免被 read -rp 覆盖）
+    echo -e "  ${CYAN}◆ ${label}${NC}  (默认: ${YELLOW}${default}${NC}，回车确认)"
+    read -rp "  > " input
+    result="${input:-$default}"
+    echo -e "  ${GREEN}✓ ${label} = ${result}${NC}"
+    echo ""
+    printf -v "$varname" '%s' "$result"
+}
+
+ask_random() {
+    local varname="$1"
+    local label="$2"
+    local randval="$3"
+    local input result
+
+    # 明确显示字段说明 + 随机值（独占多行）
+    echo -e "  ${CYAN}◆ ${label}${NC}"
+    echo -e "    随机生成值: ${YELLOW}${randval}${NC}"
+    echo -e "    (回车使用随机值，或输入自定义值覆盖)"
+    read -rp "  > " input
+    result="${input:-$randval}"
+    echo -e "  ${GREEN}✓ ${label} = ${result}${NC}"
+    echo ""
+    printf -v "$varname" '%s' "$result"
+}
+
+# 兼容旧 ask() 调用
 ask() {
     local prompt="$1" default="$2"
     ask_val REPLY_VAL "$prompt" "$default"
@@ -105,7 +143,6 @@ ask() {
 # ────────────────────────────────────────────────────────────────
 get_cert_domains() {
     local domains=()
-    # acme.sh 证书：扫描 ~/.acme.sh/<domain>/<domain>.cer
     if [[ -d /root/.acme.sh ]]; then
         while IFS= read -r dir; do
             local d
@@ -114,16 +151,82 @@ get_cert_domains() {
             [[ -d "$dir" ]] && domains+=("$d")
         done < <(find /root/.acme.sh -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
-    # /etc/ssl/private 和常见路径下的证书文件（读取 CN）
     while IFS= read -r crt; do
         [[ -z "$crt" ]] && continue
         local cn
         cn=$(openssl x509 -in "$crt" -noout -subject 2>/dev/null | grep -oP '(?<=CN\s=\s)[^,/]+' | head -1)
         [[ -n "$cn" ]] && domains+=("$cn")
-    done < <(find /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl 2>/dev/null         \( -name "*.crt" -o -name "fullchain.cer" -o -name "*.pem" \) | head -20)
-    # 去重并过滤系统自带的无效条目
-    printf '%s
-' "${domains[@]}" | sort -u | grep -v '^\*' | grep '\.' || true
+    done < <(find /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl 2>/dev/null \
+        \( -name "*.crt" -o -name "fullchain.cer" -o -name "*.pem" \) | head -20)
+    printf '%s\n' "${domains[@]}" | sort -u | grep -v '^\*' | grep '\.' || true
+}
+
+# ────────────────────────────────────────────────────────────────
+#  选择 server_name
+#  修复：每个选项编号独占一行，选完后打印「✓ 实际使用值」
+# ────────────────────────────────────────────────────────────────
+select_server_name() {
+    local default_sn="${1:-example.com}"
+    echo ""
+    echo -e "  ${CYAN}◆ server_name（域名/伪装域名）${NC}"
+
+    local domains=()
+    mapfile -t domains < <(get_cert_domains 2>/dev/null)
+
+    if [[ ${#domains[@]} -gt 0 ]]; then
+        echo -e "    检测到已安装证书，请选择："
+        for i in "${!domains[@]}"; do
+            echo -e "    ${YELLOW}$((i+1)))${NC} ${domains[$i]}"
+        done
+        local manual_idx=$(( ${#domains[@]} + 1 ))
+        echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入"
+        echo ""
+        local sn_choice
+        read -rp "  > (编号，默认 1): " sn_choice
+        sn_choice="${sn_choice:-1}"
+
+        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && \
+           [[ "$sn_choice" -ge 1 ]] && \
+           [[ "$sn_choice" -le "${#domains[@]}" ]]; then
+            SELECTED_SN="${domains[$((sn_choice-1))]}"
+        else
+            read -rp "  > 手动输入 server_name (默认 ${default_sn}): " SELECTED_SN
+            SELECTED_SN="${SELECTED_SN:-$default_sn}"
+        fi
+    else
+        echo -e "    （未检测到已安装证书，请手动输入）"
+        read -rp "  > server_name (默认 ${default_sn}): " SELECTED_SN
+        SELECTED_SN="${SELECTED_SN:-$default_sn}"
+    fi
+
+    echo -e "  ${GREEN}✓ server_name = ${SELECTED_SN}${NC}"
+    echo ""
+}
+
+# ────────────────────────────────────────────────────────────────
+#  自动定位证书路径，询问确认
+# ────────────────────────────────────────────────────────────────
+ask_cert_paths() {
+    local sn="$1"
+    local auto_cert="" auto_key=""
+
+    for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
+        [[ -f "$d/${sn}.crt"           ]] && auto_cert="$d/${sn}.crt"           && break
+        [[ -f "$d/fullchain.cer"       ]] && auto_cert="$d/fullchain.cer"       && break
+        [[ -f "$d/${sn}/fullchain.cer" ]] && auto_cert="$d/${sn}/fullchain.cer" && break
+    done
+    for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
+        [[ -f "$d/${sn}.key"   ]] && auto_key="$d/${sn}.key"   && break
+        [[ -f "$d/private.key" ]] && auto_key="$d/private.key" && break
+    done
+    [[ -z "$auto_cert" && -f "/root/.acme.sh/${sn}/fullchain.cer" ]] && auto_cert="/root/.acme.sh/${sn}/fullchain.cer"
+    [[ -z "$auto_key"  && -f "/root/.acme.sh/${sn}/${sn}.key"     ]] && auto_key="/root/.acme.sh/${sn}/${sn}.key"
+
+    local default_cert="${auto_cert:-/etc/ssl/private/fullchain.cer}"
+    local default_key="${auto_key:-/etc/ssl/private/private.key}"
+
+    ask_val CERT_PATH "cert_path（证书文件）" "$default_cert"
+    ask_val KEY_PATH  "key_path（私钥文件）"  "$default_key"
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -146,7 +249,6 @@ bootstrap_packages() {
     log_success "基础组件已就绪"
 }
 
-# 1. SSH 密钥登录
 setup_ssh_key() {
     echo ""
     log_step "配置 SSH 密钥登录"
@@ -178,7 +280,6 @@ setup_ssh_key() {
     log_success "SSH 密钥登录配置完成"
 }
 
-# 2. 禁用密码登录
 disable_password_login() {
     log_step "禁用 SSH 密码登录"
     local SSHD_CONFIG="/etc/ssh/sshd_config"
@@ -208,7 +309,6 @@ disable_password_login() {
     fi
 }
 
-# 3. 修改 SSH 端口
 change_ssh_port() {
     log_step "修改 SSH 端口"
     local current_port
@@ -237,7 +337,6 @@ change_ssh_port() {
     fi
 }
 
-# 4. 启用 BBR
 enable_bbr() {
     log_step "启用 BBR 拥塞控制"
     local current_cc
@@ -258,7 +357,6 @@ enable_bbr() {
     log_success "BBR 启用成功"
 }
 
-# 5. IP 协议优先级 & 禁用
 configure_ip_protocol() {
     echo ""
     echo -e "${CYAN}── IP 协议优先级 ──${NC}"
@@ -316,7 +414,6 @@ EOF
     esac
 }
 
-# 6. 安装配置 fail2ban
 setup_fail2ban() {
     log_step "安装并配置 fail2ban"
     if [[ "$PKG_MANAGER" == "apt" ]]; then
@@ -362,7 +459,6 @@ EOF
     systemctl is-active --quiet fail2ban && log_success "fail2ban 启动成功" || log_warn "fail2ban 启动失败，请检查日志"
 }
 
-# 基础设置菜单
 menu_basic() {
     while true; do
         clear
@@ -433,19 +529,16 @@ manage_web_services_ssl() {
 deploy_ssl() {
     log_step "SSL 证书申请与安装"
 
-    # 安装依赖
     local packages=""
     [[ "$PKG_MANAGER" == "apt" ]] && packages="curl wget socat cron openssl ca-certificates" || packages="curl wget socat cronie openssl ca-certificates"
     $PKG_MANAGER install -y $packages >/dev/null 2>&1 || true
 
-    # 启动 cron
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         systemctl enable cron >/dev/null 2>&1 && systemctl start cron >/dev/null 2>&1 || true
     else
         systemctl enable crond >/dev/null 2>&1 && systemctl start crond >/dev/null 2>&1 || true
     fi
 
-    # 域名输入
     echo ""
     echo "请输入要申请 SSL 证书的域名（多个用空格分隔）:"
     echo "示例: example.com www.example.com"
@@ -459,7 +552,6 @@ deploy_ssl() {
     echo "主域名:   $MAIN_DOMAIN"
     echo ""
 
-    # 证书路径
     echo "证书存储路径:"
     echo "  1) /etc/ssl/private/ [默认]"
     echo "  2) /etc/nginx/ssl/"
@@ -476,10 +568,8 @@ deploy_ssl() {
     esac
     mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"
 
-    # 安装 acme.sh
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        # 写到独立脚本执行，彻底隔离 bash <(curl) 的 fd，与文件6原版逻辑一致
         local acme_wrapper="/tmp/acme_wrapper_$$.sh"
         cat > "$acme_wrapper" << 'ACME_WRAPPER'
 #!/bin/bash
@@ -500,10 +590,8 @@ ACME_WRAPPER
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
     log_success "acme.sh 已就绪"
 
-    # 停止 Web 服务
     manage_web_services_ssl "stop"
 
-    # 申请证书
     log_step "申请证书..."
     local domain_args=""
     for d in "${SSL_DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
@@ -516,18 +604,14 @@ ACME_WRAPPER
         return 1
     fi
 
-    # 安装证书
     local KEY_FILE="$CERT_DIR/private.key"
     local CERT_FILE="$CERT_DIR/fullchain.cer"
     local CA_FILE="$CERT_DIR/ca.cer"
 
-    # 检测运行中的 Web 服务用于 Hook
-    local DETECTED_SVC="" PRE_HOOK="" POST_HOOK="" RELOAD_CMD="echo 'cert installed'"
+    local DETECTED_SVC="" RELOAD_CMD="echo 'cert installed'"
     for svc in nginx apache2 httpd lighttpd; do
         systemctl is-active --quiet "$svc" 2>/dev/null && {
             DETECTED_SVC="$svc"
-            PRE_HOOK="systemctl stop $svc"
-            POST_HOOK="systemctl start $svc"
             RELOAD_CMD="systemctl reload $svc"
             break
         }
@@ -542,17 +626,6 @@ ACME_WRAPPER
     chmod 600 "$KEY_FILE" 2>/dev/null || true
     chmod 644 "$CERT_FILE" "$CA_FILE" 2>/dev/null || true
 
-    # 写入 Pre/Post Hook
-    if [[ -n "$PRE_HOOK" ]]; then
-        local CONF_FILE="/root/.acme.sh/${MAIN_DOMAIN}/${MAIN_DOMAIN}.conf"
-        if [[ -f "$CONF_FILE" ]] && ! grep -q "Le_PreHook" "$CONF_FILE"; then
-            echo "Le_PreHook='$PRE_HOOK'" >> "$CONF_FILE"
-            echo "Le_PostHook='$POST_HOOK'" >> "$CONF_FILE"
-            log_success "续期 Hook 已配置（自动停启 $DETECTED_SVC）"
-        fi
-    fi
-
-    # 自动续期
     if ! crontab -l 2>/dev/null | grep -q "acme.sh.*--cron"; then
         (crontab -l 2>/dev/null; echo "0 2 * * * /root/.acme.sh/acme.sh --cron --home /root/.acme.sh >> /var/log/acme-renew.log 2>&1") | crontab -
         log_success "自动续期任务已设置（每天 02:00）"
@@ -628,7 +701,6 @@ install_singbox() {
             read -r SB_VER
             [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; press_enter; return; }
             log_step "安装 sing-box v${SB_VER}..."
-            # 通过 GitHub Releases 安装
             local ARCH
             ARCH=$(uname -m)
             case "$ARCH" in
@@ -650,10 +722,8 @@ install_singbox() {
             ;;
     esac
 
-    # 初始化目录
     mkdir -p /etc/sing-box /var/log/sing-box
 
-    # 创建 systemd service（若不存在）
     if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
         cat > /etc/systemd/system/sing-box.service << 'EOF'
 [Unit]
@@ -690,106 +760,15 @@ EOF
 
 # ────────────────────────────────────────────────────────────────
 #  ══════════════════════════════════════════════════════════════
-#  四、配置 sing-box
+#  四、配置 sing-box  —  各协议 build_* 函数
+#
+#  修复要点：
+#  1. 所有 ask_val / ask_random 调用均已采用新版格式
+#  2. 内嵌选项菜单（flow / 加密方式）用独立编号列表 + ask_val 实现，
+#     不再使用裸 echo + read，防止选项被滚屏冲走
+#  3. VLESS REALITY：handshake.server 改为询问，不再写死 127.0.0.1:8001
+#  4. 所有随机值（uuid / password / key）调用 ask_random，必显示随机值
 #  ══════════════════════════════════════════════════════════════
-# ────────────────────────────────────────────────────────────────
-
-# 选择 server_name（优先读取已装证书，未找到则手动输入）
-select_server_name() {
-    local default_sn="${1:-example.com}"
-    echo ""
-    local domains=()
-    mapfile -t domains < <(get_cert_domains 2>/dev/null)
-
-    if [[ ${#domains[@]} -gt 0 ]]; then
-        echo -e "  \033[0;36m已检测到以下证书域名：\033[0m"
-        for i in "${!domains[@]}"; do
-            echo "    $((i+1))) ${domains[$i]}"
-        done
-        local manual_idx=$(( ${#domains[@]} + 1 ))
-        echo "    ${manual_idx}) 手动输入"
-        echo ""
-        local sn_choice
-        read -rp "  请选择 server_name（输入编号）: " sn_choice
-        sn_choice="${sn_choice:-1}"
-        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
-            SELECTED_SN="${domains[$((sn_choice-1))]}"
-            echo -e "  \033[0;32m→ 使用证书域名: ${SELECTED_SN}\033[0m"
-        else
-            read -rp "  请手动输入 server_name（默认 ${default_sn}）: " SELECTED_SN
-            SELECTED_SN="${SELECTED_SN:-$default_sn}"
-            echo -e "  \033[0;32m→ server_name: ${SELECTED_SN}\033[0m"
-        fi
-    else
-        echo "  （未检测到已安装证书，请手动输入）"
-        read -rp "  请输入 server_name（默认 ${default_sn}）: " SELECTED_SN
-        SELECTED_SN="${SELECTED_SN:-$default_sn}"
-        echo -e "  \033[0;32m→ server_name: ${SELECTED_SN}\033[0m"
-    fi
-}
-
-# ────────────────────────────────────────────────────────────────
-#  通用输入函数：打印提示、显示默认值、回车后回显实际使用值
-#  用法: ask_val <变量名> <提示文字> <默认值>
-#  结果存入变量名中
-# ────────────────────────────────────────────────────────────────
-ask_val() {
-    local varname="$1"
-    local prompt="$2"
-    local default="$3"
-    local input
-    read -rp "  ${prompt} [${default}]: " input
-    local result="${input:-$default}"
-    # 回车使用默认时，绿色回显实际值
-    if [[ -z "$input" ]]; then
-        echo -e "  ${GREEN}→ ${result}${NC}"
-    fi
-    # 将结果写入调用方指定的变量
-    printf -v "$varname" '%s' "$result"
-}
-
-# 随机值输入：先显示随机值供参考，回车使用，或手动覆盖
-# 用法: ask_random <变量名> <提示文字> <随机值>
-ask_random() {
-    local varname="$1"
-    local prompt="$2"
-    local randval="$3"
-    local input
-    echo -e "  ${YELLOW}${prompt}${NC}"
-    echo -e "  随机生成: ${CYAN}${randval}${NC}"
-    read -rp "  直接回车使用随机值，或输入自定义值: " input
-    local result="${input:-$randval}"
-    echo -e "  ${GREEN}→ ${result}${NC}"
-    printf -v "$varname" '%s' "$result"
-}
-
-# 询问证书路径（server_name 已选定后调用，结果存入 CERT_PATH / KEY_PATH）
-ask_cert_paths() {
-    local sn="$1"
-    # 尝试自动定位证书文件
-    local auto_cert="" auto_key=""
-    for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/${sn}.crt"       ]] && auto_cert="$d/${sn}.crt"       && break
-        [[ -f "$d/fullchain.cer"   ]] && auto_cert="$d/fullchain.cer"   && break
-        [[ -f "$d/${sn}/fullchain.cer" ]] && auto_cert="$d/${sn}/fullchain.cer" && break
-    done
-    for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/${sn}.key"   ]] && auto_key="$d/${sn}.key"   && break
-        [[ -f "$d/private.key" ]] && auto_key="$d/private.key" && break
-    done
-    # acme.sh 路径
-    [[ -z "$auto_cert" && -f "/root/.acme.sh/${sn}/fullchain.cer" ]] && auto_cert="/root/.acme.sh/${sn}/fullchain.cer"
-    [[ -z "$auto_key"  && -f "/root/.acme.sh/${sn}/${sn}.key"     ]] && auto_key="/root/.acme.sh/${sn}/${sn}.key"
-
-    local default_cert="${auto_cert:-/etc/ssl/private/${sn}.crt}"
-    local default_key="${auto_key:-/etc/ssl/private/${sn}.key}"
-
-    ask_val CERT_PATH "cert_path" "$default_cert"
-    ask_val KEY_PATH  "key_path"  "$default_key"
-}
-
-# ────────────────────────────────────────────────────────────────
-#  构建 inbound JSON 片段
 # ────────────────────────────────────────────────────────────────
 
 # 1. VLESS TCP / XTLS-Vision
@@ -797,18 +776,35 @@ build_vless_tcp() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — TCP / XTLS-Vision ───${NC}"
-    local tag port uuid uname fc
-    ask_val   tag   "tag"       "vless-tcp-in"
-    ask_val   port  "listen_port" "1443"
-    ask_random uuid "uuid" "$(gen_uuid)"
-    ask_val   uname "用户名 name" "user-vless-tcp"
-    echo -e "  flow:"
-    echo    "    1) xtls-rprx-vision [默认]"
-    echo    "    2) 无（普通 TCP）"
-    ask_val fc "请选择" "1"
-    local flow; [[ "$fc" == "2" ]] && flow='"flow": ""' || flow='"flow": "xtls-rprx-vision"'
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+    echo ""
+
+    local tag port uuid uname flow_choice flow
+
+    ask_val   tag   "tag（inbound 标识）"  "vless-tcp-in"
+    ask_val   port  "listen_port（监听端口）" "1443"
+    ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+    ask_val   uname "name（用户名）" "user-vless-tcp"
+
+    echo -e "  ${CYAN}◆ flow（流控模式）${NC}"
+    echo -e "    ${YELLOW}1)${NC} xtls-rprx-vision  [推荐，XTLS Vision 模式]"
+    echo -e "    ${YELLOW}2)${NC} 无（普通 TLS，不启用流控）"
+    ask_val flow_choice "请输入编号" "1"
+    if [[ "$flow_choice" == "2" ]]; then
+        flow=""
+        echo -e "  ${GREEN}✓ flow = （空，普通 TLS）${NC}"
+    else
+        flow="xtls-rprx-vision"
+        echo -e "  ${GREEN}✓ flow = xtls-rprx-vision${NC}"
+    fi
+    echo ""
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    local flow_json
+    [[ -n "$flow" ]] && flow_json='"flow": "'"$flow"'"' || flow_json='"flow": ""'
 
     cat > "$_jf" << EOF
     {
@@ -816,7 +812,7 @@ build_vless_tcp() {
       "tag": "$tag",
       "listen": "::",
       "listen_port": $port,
-      "users": [{"name": "$uname", "uuid": "$uuid", $flow}],
+      "users": [{"name": "$uname", "uuid": "$uuid", $flow_json}],
       "tls": {
         "enabled": true,
         "server_name": "$sn",
@@ -834,13 +830,19 @@ build_vless_ws() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — WebSocket ───${NC}"
+    echo ""
+
     local tag port uuid wspath
-    ask_val   tag    "tag"         "vless-ws-in"
-    ask_val   port   "listen_port" "8443"
-    ask_random uuid  "uuid"        "$(gen_uuid)"
-    ask_val   wspath "ws path"     "/vless-ws"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag    "tag（inbound 标识）"    "vless-ws-in"
+    ask_val   port   "listen_port（监听端口）" "8443"
+    ask_random uuid  "uuid（用户 UUID）"       "$(gen_uuid)"
+    ask_val   wspath "ws path（WebSocket 路径）" "/vless-ws"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -872,13 +874,19 @@ build_vless_grpc() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — gRPC ───${NC}"
+    echo ""
+
     local tag port uuid svcname
-    ask_val   tag     "tag"          "vless-grpc-in"
-    ask_val   port    "listen_port"  "8444"
-    ask_random uuid   "uuid"         "$(gen_uuid)"
-    ask_val   svcname "service_name" "vless-grpc-service"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag     "tag（inbound 标识）"     "vless-grpc-in"
+    ask_val   port    "listen_port（监听端口）"  "8444"
+    ask_random uuid   "uuid（用户 UUID）"        "$(gen_uuid)"
+    ask_val   svcname "service_name（gRPC 服务名）" "vless-grpc-service"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -909,29 +917,40 @@ build_vless_reality() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VLESS — REALITY ───${NC}"
-    local port uuid pk si sn
-
-    ask_val port "listen_port" "443"
-    ask_random uuid "uuid" "$(gen_uuid)"
-
     echo ""
+
+    local port uuid pk si sn hs_server hs_port
+
+    ask_val port "listen_port（监听端口，建议 443）" "443"
+    ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
+
     echo -e "  ${YELLOW}正在生成 REALITY 密钥对...${NC}"
-    local keypair_out privkey pubkey sid_rand
+    local keypair_out privkey pubkey
     keypair_out=$(gen_reality_keypair)
     privkey=$(echo "$keypair_out" | grep -i private | awk '{print $NF}')
     pubkey=$(echo  "$keypair_out" | grep -i public  | awk '{print $NF}')
+    local sid_rand
     sid_rand=$(gen_short_id)
+    echo ""
 
-    ask_random pk  "private_key" "$privkey"
-    ask_random si  "short_id"    "$sid_rand"
+    ask_random pk "private_key（REALITY 私钥，服务端用）" "$privkey"
+    ask_random si "short_id（REALITY Short ID）" "$sid_rand"
 
     echo ""
     echo -e "  ${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
-    echo -e "  ${BOLD}${CYAN}  $pubkey${NC}"
+    echo -e "  ${BOLD}${CYAN}    $pubkey${NC}"
     echo ""
 
-    echo -e "  server_name（REALITY 伪装域名，无需拥有，使用公网可访问的域名即可）:"
+    echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
+    echo -e "    说明：不需要拥有该域名，使用公网可访问的 TLS 网站即可"
+    echo -e "    例如：www.microsoft.com / www.apple.com / www.amazon.com"
     ask_val sn "server_name" "www.microsoft.com"
+
+    echo -e "  ${CYAN}◆ handshake 目标（REALITY 握手转发地址）${NC}"
+    echo -e "    通常填写与 server_name 对应的真实服务器 IP，或本地端口转发"
+    echo -e "    若不确定，可保持默认（会连接 ${sn}:443 做握手）"
+    ask_val hs_server "handshake server（IP 或域名）" "$sn"
+    ask_val hs_port   "handshake port" "443"
 
     cat > "$_jf" << EOF
     {
@@ -945,7 +964,7 @@ build_vless_reality() {
         "server_name": "$sn",
         "reality": {
           "enabled": true,
-          "handshake": {"server": "127.0.0.1", "server_port": 8001},
+          "handshake": {"server": "$hs_server", "server_port": $hs_port},
           "private_key": "$pk",
           "short_id": ["$si"]
         }
@@ -959,12 +978,18 @@ build_vmess_tcp() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VMess — TCP (TLS) ───${NC}"
+    echo ""
+
     local tag port uuid
-    ask_val   tag  "tag"         "vmess-tcp-in"
-    ask_val   port "listen_port" "9443"
-    ask_random uuid "uuid"       "$(gen_uuid)"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag  "tag（inbound 标识）"    "vmess-tcp-in"
+    ask_val   port "listen_port（监听端口）" "9443"
+    ask_random uuid "uuid（用户 UUID）"     "$(gen_uuid)"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -989,13 +1014,19 @@ build_vmess_ws() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── VMess — WebSocket (TLS) ───${NC}"
+    echo ""
+
     local tag port uuid wspath
-    ask_val   tag    "tag"         "vmess-ws-in"
-    ask_val   port   "listen_port" "9444"
-    ask_random uuid  "uuid"        "$(gen_uuid)"
-    ask_val   wspath "ws path"     "/vmess-ws"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag    "tag（inbound 标识）"       "vmess-ws-in"
+    ask_val   port   "listen_port（监听端口）"    "9444"
+    ask_random uuid  "uuid（用户 UUID）"          "$(gen_uuid)"
+    ask_val   wspath "ws path（WebSocket 路径）"  "/vmess-ws"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1025,13 +1056,19 @@ build_trojan_tcp() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Trojan — TCP (TLS) ───${NC}"
+    echo ""
+
     local tag port pwd uname
-    ask_val   tag   "tag"          "trojan-tcp-in"
-    ask_val   port  "listen_port"  "10443"
-    ask_random pwd  "password"     "$(gen_password 20)"
-    ask_val   uname "用户名 name"  "user-trojan-tcp"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag   "tag（inbound 标识）"    "trojan-tcp-in"
+    ask_val   port  "listen_port（监听端口）" "10443"
+    ask_random pwd  "password（Trojan 密码）" "$(gen_password 20)"
+    ask_val   uname "name（用户名）"          "user-trojan-tcp"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1057,13 +1094,19 @@ build_trojan_ws() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Trojan — WebSocket (TLS) ───${NC}"
+    echo ""
+
     local tag port pwd wspath
-    ask_val   tag    "tag"         "trojan-ws-in"
-    ask_val   port   "listen_port" "10444"
-    ask_random pwd   "password"    "$(gen_password 20)"
-    ask_val   wspath "ws path"     "/trojan-ws"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag    "tag（inbound 标识）"       "trojan-ws-in"
+    ask_val   port   "listen_port（监听端口）"    "10444"
+    ask_random pwd   "password（Trojan 密码）"    "$(gen_password 20)"
+    ask_val   wspath "ws path（WebSocket 路径）"  "/trojan-ws"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1093,18 +1136,27 @@ build_ss_classic() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks — 经典加密 ───${NC}"
-    local tag port mc pwd
-    ask_val tag  "tag"         "ss-aes-in"
-    ask_val port "listen_port" "11001"
-    echo -e "  加密方式:"
-    echo    "    1) aes-256-gcm [默认]"
-    echo    "    2) aes-128-gcm"
-    echo    "    3) chacha20-ietf-poly1305"
-    ask_val mc "请选择" "1"
-    local method
-    case $mc in 2) method="aes-128-gcm" ;; 3) method="chacha20-ietf-poly1305" ;; *) method="aes-256-gcm" ;; esac
-    echo -e "  ${GREEN}→ 加密方式: ${method}${NC}"
-    ask_random pwd "password" "$(gen_password 20)"
+    echo ""
+
+    local tag port mc method pwd
+
+    ask_val tag  "tag（inbound 标识）"    "ss-aes-in"
+    ask_val port "listen_port（监听端口）" "11001"
+
+    echo -e "  ${CYAN}◆ 加密方式${NC}"
+    echo -e "    ${YELLOW}1)${NC} aes-256-gcm          [默认，推荐]"
+    echo -e "    ${YELLOW}2)${NC} aes-128-gcm"
+    echo -e "    ${YELLOW}3)${NC} chacha20-ietf-poly1305"
+    ask_val mc "请输入编号" "1"
+    case $mc in
+        2) method="aes-128-gcm" ;;
+        3) method="chacha20-ietf-poly1305" ;;
+        *) method="aes-256-gcm" ;;
+    esac
+    echo -e "  ${GREEN}✓ 加密方式 = ${method}${NC}"
+    echo ""
+
+    ask_random pwd "password（连接密码）" "$(gen_password 20)"
 
     cat > "$_jf" << EOF
     {
@@ -1124,12 +1176,15 @@ build_ss2022_256() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks 2022 — aes-256-gcm ───${NC}"
+    echo ""
+
     local tag port spwd upwd uname
-    ask_val   tag   "tag"         "ss-2022-256-in"
-    ask_val   port  "listen_port" "11002"
-    ask_random spwd "server password (base64-32B)" "$(gen_ss2022_key_256)"
-    ask_random upwd "user password (base64-32B)"   "$(gen_ss2022_key_256)"
-    ask_val   uname "用户名 name" "user-ss-2022-256"
+
+    ask_val   tag   "tag（inbound 标识）"    "ss-2022-256-in"
+    ask_val   port  "listen_port（监听端口）" "11002"
+    ask_random spwd "server password（服务端密钥，base64-32B）" "$(gen_ss2022_key_256)"
+    ask_random upwd "user password（用户密钥，base64-32B）"     "$(gen_ss2022_key_256)"
+    ask_val   uname "name（用户名）" "user-ss-2022-256"
 
     cat > "$_jf" << EOF
     {
@@ -1150,11 +1205,14 @@ build_ss2022_128() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Shadowsocks 2022 — aes-128-gcm ───${NC}"
+    echo ""
+
     local tag port spwd upwd
-    ask_val   tag  "tag"         "ss-2022-128-in"
-    ask_val   port "listen_port" "11003"
-    ask_random spwd "server password (base64-16B)" "$(gen_ss2022_key_128)"
-    ask_random upwd "user password (base64-16B)"   "$(gen_ss2022_key_128)"
+
+    ask_val   tag  "tag（inbound 标识）"    "ss-2022-128-in"
+    ask_val   port "listen_port（监听端口）" "11003"
+    ask_random spwd "server password（服务端密钥，base64-16B）" "$(gen_ss2022_key_128)"
+    ask_random upwd "user password（用户密钥，base64-16B）"     "$(gen_ss2022_key_128)"
 
     cat > "$_jf" << EOF
     {
@@ -1175,15 +1233,21 @@ build_hysteria2() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── Hysteria2 ───${NC}"
+    echo ""
+
     local tag port pwd obfspwd up dn
-    ask_val   tag     "tag"          "hysteria2-in"
-    ask_val   port    "listen_port"  "12443"
-    ask_random pwd    "password"     "$(gen_password 24)"
-    ask_random obfspwd "obfs password" "$(gen_password 16)"
-    ask_val   up      "up_mbps"      "200"
-    ask_val   dn      "down_mbps"    "100"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag      "tag（inbound 标识）"    "hysteria2-in"
+    ask_val   port     "listen_port（监听端口）" "12443"
+    ask_random pwd     "password（连接密码）"    "$(gen_password 24)"
+    ask_random obfspwd "obfs password（混淆密码）" "$(gen_password 16)"
+    ask_val   up       "up_mbps（上行限速 Mbps）"  "200"
+    ask_val   dn       "down_mbps（下行限速 Mbps）" "100"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1212,13 +1276,19 @@ build_tuic() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── TUIC v5 ───${NC}"
+    echo ""
+
     local tag port uuid pwd
-    ask_val   tag  "tag"         "tuic-in"
-    ask_val   port "listen_port" "13443"
-    ask_random uuid "uuid"       "$(gen_uuid)"
-    ask_random pwd  "password"   "$(gen_password 20)"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag  "tag（inbound 标识）"    "tuic-in"
+    ask_val   port "listen_port（监听端口）" "13443"
+    ask_random uuid "uuid（用户 UUID）"     "$(gen_uuid)"
+    ask_random pwd  "password（用户密码）"  "$(gen_password 20)"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1247,12 +1317,18 @@ build_anytls() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── AnyTLS ───${NC}"
+    echo ""
+
     local tag port pwd
-    ask_val   tag  "tag"         "anytls-in"
-    ask_val   port "listen_port" "14443"
-    ask_random pwd "password"    "$(gen_password 24)"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag  "tag（inbound 标识）"    "anytls-in"
+    ask_val   port "listen_port（监听端口）" "14443"
+    ask_random pwd "password（连接密码）"   "$(gen_password 24)"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1277,13 +1353,19 @@ build_naive() {
     local _jf="$1"
     echo ""
     echo -e "${CYAN}  ─── NaïveProxy ───${NC}"
+    echo ""
+
     local tag port uname pwd
-    ask_val   tag   "tag"         "naive-in"
-    ask_val   port  "listen_port" "15443"
-    ask_random uname "username"   "$(gen_naive_username)"
-    ask_random pwd   "password"   "$(gen_password 20)"
-    select_server_name "example.com"; local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"; local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    ask_val   tag   "tag（inbound 标识）"    "naive-in"
+    ask_val   port  "listen_port（监听端口）" "15443"
+    ask_random uname "username（用户名）"    "$(gen_naive_username)"
+    ask_random pwd   "password（用户密码）"  "$(gen_password 20)"
+
+    select_server_name "example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
 
     cat > "$_jf" << EOF
     {
@@ -1303,6 +1385,9 @@ build_naive() {
 EOF
 }
 
+# ────────────────────────────────────────────────────────────────
+#  configure_singbox：选协议 → 逐个配置 → 合并写入 config.json
+# ────────────────────────────────────────────────────────────────
 configure_singbox() {
     clear
     echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
@@ -1333,48 +1418,44 @@ configure_singbox() {
 
     echo ""
     log_info "已选择 ${#PROTO_CHOICES[@]} 个协议，开始逐一配置..."
-    echo ""
 
-    # 用临时文件收集 JSON，build_* 函数直接写终端（不被子shell捕获）
     local TMP_JSON
     TMP_JSON=$(mktemp /tmp/jddj_inbound_XXXXXX)
     local INBOUNDS_JSON=""
     local first=true
 
     for choice in "${PROTO_CHOICES[@]}"; do
-        # 清空临时文件
         > "$TMP_JSON"
         case $choice in
-            1)  build_vless_tcp    "$TMP_JSON" ;;
-            2)  build_vless_ws     "$TMP_JSON" ;;
-            3)  build_vless_grpc   "$TMP_JSON" ;;
+            1)  build_vless_tcp     "$TMP_JSON" ;;
+            2)  build_vless_ws      "$TMP_JSON" ;;
+            3)  build_vless_grpc    "$TMP_JSON" ;;
             4)  build_vless_reality "$TMP_JSON" ;;
-            5)  build_vmess_tcp    "$TMP_JSON" ;;
-            6)  build_vmess_ws     "$TMP_JSON" ;;
-            7)  build_trojan_tcp   "$TMP_JSON" ;;
-            8)  build_trojan_ws    "$TMP_JSON" ;;
-            9)  build_ss_classic   "$TMP_JSON" ;;
-            10) build_ss2022_256   "$TMP_JSON" ;;
-            11) build_ss2022_128   "$TMP_JSON" ;;
-            12) build_hysteria2    "$TMP_JSON" ;;
-            13) build_tuic         "$TMP_JSON" ;;
-            14) build_anytls       "$TMP_JSON" ;;
-            15) build_naive        "$TMP_JSON" ;;
+            5)  build_vmess_tcp     "$TMP_JSON" ;;
+            6)  build_vmess_ws      "$TMP_JSON" ;;
+            7)  build_trojan_tcp    "$TMP_JSON" ;;
+            8)  build_trojan_ws     "$TMP_JSON" ;;
+            9)  build_ss_classic    "$TMP_JSON" ;;
+            10) build_ss2022_256    "$TMP_JSON" ;;
+            11) build_ss2022_128    "$TMP_JSON" ;;
+            12) build_hysteria2     "$TMP_JSON" ;;
+            13) build_tuic          "$TMP_JSON" ;;
+            14) build_anytls        "$TMP_JSON" ;;
+            15) build_naive         "$TMP_JSON" ;;
             *)  log_warn "未知选项: $choice，跳过"; continue ;;
         esac
         local inbound_json
         inbound_json=$(cat "$TMP_JSON")
-        if [[ -z "$inbound_json" ]]; then continue; fi
+        [[ -z "$inbound_json" ]] && continue
         if $first; then
             INBOUNDS_JSON="$inbound_json"
             first=false
         else
-            INBOUNDS_JSON="$INBOUNDS_JSON,$inbound_json"
+            INBOUNDS_JSON="${INBOUNDS_JSON},${inbound_json}"
         fi
     done
     rm -f "$TMP_JSON"
 
-    # 生成完整 config.json
     mkdir -p /etc/sing-box
     cat > /etc/sing-box/config.json << EOF
 {
@@ -1417,12 +1498,12 @@ EOF
     log_success "配置文件已写入: /etc/sing-box/config.json"
     echo ""
 
-    # 验证配置
     if command -v sing-box &>/dev/null; then
         if sing-box check -c /etc/sing-box/config.json 2>/dev/null; then
             log_success "配置语法验证通过"
         else
-            log_warn "配置语法验证失败，请手动检查 /etc/sing-box/config.json"
+            log_warn "配置语法验证失败，详细原因："
+            sing-box check -c /etc/sing-box/config.json
         fi
     fi
 
@@ -1482,7 +1563,10 @@ menu_service() {
             8) journalctl -u sing-box -f --no-pager ;;
             9)
                 if command -v sing-box &>/dev/null; then
-                    sing-box check -c /etc/sing-box/config.json && log_success "配置验证通过" || log_error "配置验证失败"
+                    sing-box check -c /etc/sing-box/config.json && log_success "配置验证通过" || {
+                        log_error "配置验证失败，详细原因："
+                        sing-box check -c /etc/sing-box/config.json
+                    }
                 else
                     log_error "sing-box 未安装"
                 fi
@@ -1499,13 +1583,11 @@ menu_service() {
 #  ══════════════════════════════════════════════════════════════
 # ────────────────────────────────────────────────────────────────
 
-# URL 编码
 urlencode() {
     python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1" 2>/dev/null || \
     printf '%s' "$1" | od -An -tx1 | tr ' ' '%' | tr -d '\n'
 }
 
-# 获取服务器公网 IP
 get_server_ip() {
     local ip=""
     for svc in "https://api.ipify.org" "https://ifconfig.me" "https://ip.sb" "https://ipinfo.io/ip"; do
@@ -1514,19 +1596,6 @@ get_server_ip() {
     echo "${ip:-127.0.0.1}"
 }
 
-get_sni_from_tls() {
-    local tls_json="$1" fallback="$2"
-    python3 -c "
-import json,sys
-try:
-    d=json.loads(sys.argv[1])
-    print(d.get('server_name') or sys.argv[2])
-except:
-    print(sys.argv[2])
-" "$tls_json" "$fallback" 2>/dev/null || echo "$fallback"
-}
-
-# 解析 config.json 生成所有链接
 generate_links() {
     local CONFIG="/etc/sing-box/config.json"
     if [[ ! -f "$CONFIG" ]]; then
@@ -1604,7 +1673,6 @@ for ib in inbounds:
     net = transport.get('type', 'tcp')
     ws_path = transport.get('path', '/')
 
-    # ─── VLESS ───
     if t == 'vless':
         if not users: continue
         u = users[0]
@@ -1616,7 +1684,8 @@ for ib in inbounds:
 
         if reality_on:
             pbk = reality.get('public_key', '')
-            sid = reality.get('short_id', [''])[0] if isinstance(reality.get('short_id'), list) else reality.get('short_id', '')
+            sid_val = reality.get('short_id', [''])
+            sid = sid_val[0] if isinstance(sid_val, list) else sid_val
             params = f"encryption=none&flow={flow}&security=reality&sni={sni}&fp=chrome&pbk={urlencode(pbk)}&sid={sid}&type=tcp&headerType=none"
         else:
             sec = 'tls' if tls_on else 'none'
@@ -1629,7 +1698,6 @@ for ib in inbounds:
         link = f"vless://{uuid}@{addr}:{port}?{params}#{tag_enc}"
         links.append(link)
 
-        # Clash VLESS
         cp = {
             'name': tag, 'type': 'vless', 'server': addr, 'port': port,
             'uuid': uuid, 'tls': tls_on, 'servername': sni,
@@ -1644,7 +1712,6 @@ for ib in inbounds:
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
-    # ─── VMESS ───
     elif t == 'vmess':
         if not users: continue
         u = users[0]
@@ -1671,7 +1738,6 @@ for ib in inbounds:
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
-    # ─── TROJAN ───
     elif t == 'trojan':
         if not users: continue
         pwd = users[0].get('password', '')
@@ -1689,7 +1755,6 @@ for ib in inbounds:
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
-    # ─── SHADOWSOCKS ───
     elif t == 'shadowsocks':
         method = ib.get('method', '')
         pwd    = ib.get('password', '')
@@ -1704,7 +1769,6 @@ for ib in inbounds:
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
-    # ─── HYSTERIA2 ───
     elif t == 'hysteria2':
         if not users: continue
         pwd    = users[0].get('password', '')
@@ -1721,7 +1785,6 @@ for ib in inbounds:
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
-    # ─── TUIC ───
     elif t == 'tuic':
         if not users: continue
         u    = users[0]
@@ -1739,15 +1802,12 @@ for ib in inbounds:
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
-    # ─── ANYTLS ───
     elif t == 'anytls':
         if not users: continue
         pwd    = users[0].get('password', '')
         params = f"security=tls&sni={sni}&type=tcp"
         links.append(f"anytls://{urlencode(pwd)}@{addr}:{port}?{params}#{tag_enc}")
-        # Clash 暂无原生支持，跳过
 
-    # ─── NAIVE ───
     elif t == 'naive':
         if not users: continue
         u    = users[0]
@@ -1755,20 +1815,12 @@ for ib in inbounds:
         pwd   = u.get('password', '')
         links.append(f"naive+https://{urlencode(uname)}:{urlencode(pwd)}@{addr}:{port}?padding=true#{tag_enc}")
 
-# ──────────────────────────────────────────────
-# 写入明文订阅
-# ──────────────────────────────────────────────
 with open(OUTPUT_FILE, 'w') as f:
     f.write('\n'.join(links) + '\n')
 
-# 写入 Base64 订阅 (V2RayN/通用)
 with open(B64_FILE, 'w') as f:
     f.write(base64.b64encode('\n'.join(links).encode()).decode() + '\n')
 
-# ──────────────────────────────────────────────
-# Clash / Mihomo YAML
-# ──────────────────────────────────────────────
-import yaml if True else None
 try:
     import yaml
     clash_doc = {
@@ -1788,7 +1840,6 @@ try:
         yaml.dump(clash_doc, f, allow_unicode=True, default_flow_style=False)
     print(f"Clash/Mihomo 配置已写入: {CLASH_FILE}")
 except ImportError:
-    # 手动生成 YAML
     with open(CLASH_FILE, 'w') as f:
         f.write("mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: info\n\nproxies:\n")
         for p in clash_proxies:
@@ -1847,9 +1898,7 @@ menu_links() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  ══════════════════════════════════════════════════════════════
-#  全部执行 (1→6)
-#  ══════════════════════════════════════════════════════════════
+#  全部执行 1→6
 # ────────────────────────────────────────────────────────────────
 
 run_all() {
@@ -1885,7 +1934,6 @@ run_all() {
 
     echo ""
     echo -e "${BLUE}── 步骤 3：安装 sing-box ──${NC}"
-    # 默认 Latest
     bash <(curl -fsSL https://sing-box.app/deb-install.sh) 2>/dev/null || true
     mkdir -p /etc/sing-box /var/log/sing-box
 
@@ -1914,7 +1962,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.0)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.1)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
@@ -1950,17 +1998,13 @@ main_menu() {
 
 # ────────────────────────────────────────────────────────────────
 #  安装 jddj 快捷命令
-#  兼容 bash <(curl ...) 管道方式运行（$0 为 /proc/xxx/fd/pipe:...）
 # ────────────────────────────────────────────────────────────────
 JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
 
 install_self() {
     local TARGET="/usr/local/bin/jddj"
-
-    # 已经是从 TARGET 运行，无需重装
     [[ "$0" == "$TARGET" ]] && return
 
-    # 统一从远端下载保存，避免 bash <(curl...) 管道方式下 $0 不是真实文件的问题
     if curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null; then
         chmod +x "$TARGET"
         log_success "已安装快捷命令 jddj，下次直接输入 jddj 进入管理界面"
