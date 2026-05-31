@@ -476,12 +476,25 @@ deploy_ssl() {
     esac
     mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"
 
-    # 安装 acme.sh
+    # 安装 acme.sh（先下载到临时文件再执行，避免 bash <(curl) 的 fd 冲突）
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        curl https://get.acme.sh 2>/dev/null | sh >/dev/null 2>&1 || \
-        wget -O- https://get.acme.sh 2>/dev/null | sh >/dev/null 2>&1 || \
-        { log_error "acme.sh 安装失败"; return 1; }
+        local acme_installer="/tmp/acme_install_$$.sh"
+        if curl -fsSL "https://get.acme.sh" -o "$acme_installer" 2>/dev/null ||            wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null; then
+            bash "$acme_installer" --install-online 2>&1 | tail -5
+            rm -f "$acme_installer"
+        else
+            rm -f "$acme_installer"
+            log_error "acme.sh 下载失败，请检查网络"
+            return 1
+        fi
+        if [[ ! -f /root/.acme.sh/acme.sh ]]; then
+            log_error "acme.sh 安装失败"
+            return 1
+        fi
+    else
+        log_info "acme.sh 已存在，检查更新..."
+        /root/.acme.sh/acme.sh --upgrade >/dev/null 2>&1 || true
     fi
     ln -sf /root/.acme.sh/acme.sh /usr/local/bin/acme.sh 2>/dev/null || true
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
