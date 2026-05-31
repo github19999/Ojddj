@@ -479,20 +479,19 @@ deploy_ssl() {
     # 安装 acme.sh
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        # 先确保 cron 在跑，acme.sh 安装时会检查
-        systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || true
-        # 下载安装脚本到真实文件（不用管道，避免 bash <(curl) 的 fd 冲突）
+        # 下载 acme.sh 主程序（不是 get.acme.sh 包装脚本）
         local acme_installer="/tmp/acme_install_$$.sh"
-        if ! curl -fsSL "https://get.acme.sh" -o "$acme_installer" 2>/dev/null; then
-            wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null || {
+        if ! curl -fsSL "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"                 -o "$acme_installer" 2>/dev/null; then
+            wget -qO "$acme_installer"                 "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" 2>/dev/null || {
                 rm -f "$acme_installer"
                 log_error "acme.sh 下载失败"
                 return 1
             }
         fi
-        # 用 INSTALLONLINE=1 环境变量 + --install 参数，等同于官方推荐安装方式
-        # NO_CRON=1 跳过 cron 检查（我们脚本里已单独配置 cron）
-        bash "$acme_installer" --install --no-cron
+        chmod +x "$acme_installer"
+        # --install-online 让 acme.sh 自己下载完整包并安装
+        # --nocron 跳过 crontab 检查（脚本后续单独配置）
+        bash "$acme_installer" --install-online --nocron
         local acme_ret=$?
         rm -f "$acme_installer"
         if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
