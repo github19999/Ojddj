@@ -481,7 +481,7 @@ deploy_ssl() {
         log_step "安装 acme.sh..."
         local acme_installer="/tmp/acme_install_$$.sh"
         if curl -fsSL "https://get.acme.sh" -o "$acme_installer" 2>/dev/null ||            wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null; then
-            bash "$acme_installer" --install-online 2>&1 | tail -5
+            bash "$acme_installer" 2>&1 | tail -5
             rm -f "$acme_installer"
         else
             rm -f "$acme_installer"
