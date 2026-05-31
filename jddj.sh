@@ -529,27 +529,25 @@ manage_web_services_ssl() {
 deploy_ssl() {
     log_step "SSL 证书申请与安装"
 
+    # ── 1. 安装依赖 ──────────────────────────────────────────────
     local packages=""
-    [[ "$PKG_MANAGER" == "apt" ]] && packages="curl wget socat cron openssl ca-certificates" || packages="curl wget socat cronie openssl ca-certificates"
+    [[ "$PKG_MANAGER" == "apt" ]] && \
+        packages="curl wget socat cron openssl ca-certificates" || \
+        packages="curl wget socat cronie openssl ca-certificates"
     $PKG_MANAGER install -y $packages >/dev/null 2>&1 || true
 
-    # 确保 cron 服务真正启动（acme.sh 安装时会检测，未运行则中止）
-    local cron_running=false
-    if [[ "$PKG_MANAGER" == "apt" ]]; then
-        systemctl enable cron >/dev/null 2>&1 || true
-        systemctl start  cron >/dev/null 2>&1 || true
-        systemctl is-active --quiet cron 2>/dev/null && cron_running=true
-    else
-        systemctl enable crond >/dev/null 2>&1 || true
-        systemctl start  crond >/dev/null 2>&1 || true
-        systemctl is-active --quiet crond 2>/dev/null && cron_running=true
-    fi
-    if $cron_running; then
+    # 按发行版启动对应 cron 服务（Debian 用 cron，CentOS 用 crond）
+    local cron_svc="cron"
+    [[ "$PKG_MANAGER" != "apt" ]] && cron_svc="crond"
+    systemctl enable "$cron_svc" >/dev/null 2>&1 || true
+    systemctl start  "$cron_svc" >/dev/null 2>&1 || true
+    if systemctl is-active --quiet "$cron_svc" 2>/dev/null; then
         log_success "cron 服务已运行"
     else
-        log_warn "cron 服务启动失败，acme.sh 将以 --force 模式跳过 cron 检查"
+        log_warn "cron 服务未能启动，自动续期 crontab 将在证书安装后手动补充"
     fi
 
+    # ── 2. 域名输入 ──────────────────────────────────────────────
     echo ""
     echo "请输入要申请 SSL 证书的域名（多个用空格分隔）:"
     echo "示例: example.com www.example.com"
@@ -563,6 +561,7 @@ deploy_ssl() {
     echo "主域名:   $MAIN_DOMAIN"
     echo ""
 
+    # ── 3. 证书存储路径 ──────────────────────────────────────────
     echo "证书存储路径:"
     echo "  1) /etc/ssl/private/ [默认]"
     echo "  2) /etc/nginx/ssl/"
@@ -579,33 +578,41 @@ deploy_ssl() {
     esac
     mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"
 
+    # ── 4. 安装 acme.sh ──────────────────────────────────────────
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        # 先下载安装脚本到本地，再传 --force 执行
-        # --force 作用：当 cron 未运行时跳过中止，改为后续手动补 crontab
-        local acme_installer="/tmp/acme_install_$$.sh"
-        if ! curl -fsSL https://get.acme.sh -o "$acme_installer" 2>/dev/null &&            ! wget -qO  "$acme_installer" https://get.acme.sh 2>/dev/null; then
+        # 参照官方推荐方式：curl 管道给 sh 执行（安装脚本本身不接受 --force）
+        # cron 未运行时 acme.sh 安装脚本会打印警告，但不会中止安装
+        # 使用临时脚本隔离 fd，避免 bash <(curl) 管道模式下 stdin 被占用
+        local _acme_tmp="/tmp/_acme_install_$$.sh"
+        if curl -fsSL https://get.acme.sh -o "$_acme_tmp" 2>/dev/null || \
+           wget -qO  "$_acme_tmp" https://get.acme.sh 2>/dev/null; then
+            sh "$_acme_tmp"   # 不传任何额外参数，与官方 curl|sh 等效
+            rm -f "$_acme_tmp"
+        else
+            rm -f "$_acme_tmp"
             log_error "acme.sh 安装包下载失败，请检查网络"
             return 1
         fi
-        bash "$acme_installer" --force
-        local acme_ret=$?
-        rm -f "$acme_installer"
-        if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
-            log_error "acme.sh 安装失败（退出码: $acme_ret）"
+        # 安装脚本退出码不可靠（警告也返回0），只检查文件是否存在
+        if [[ ! -f /root/.acme.sh/acme.sh ]]; then
+            log_error "acme.sh 安装失败，未找到 /root/.acme.sh/acme.sh"
             return 1
         fi
     else
         log_info "acme.sh 已存在，检查更新..."
         /root/.acme.sh/acme.sh --upgrade >/dev/null 2>&1 || true
     fi
+
     ln -sf /root/.acme.sh/acme.sh /usr/local/bin/acme.sh 2>/dev/null || true
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
     log_success "acme.sh 已就绪"
 
+    # ── 5. 停止 Web 服务（释放80端口）──────────────────────────
     manage_web_services_ssl "stop"
 
-    log_step "申请证书..."
+    # ── 6. 申请证书 ──────────────────────────────────────────────
+    log_step "申请证书（Standalone 模式）..."
     local domain_args=""
     for d in "${SSL_DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
 
@@ -617,35 +624,71 @@ deploy_ssl() {
         return 1
     fi
 
+    # ── 7. 安装证书到指定目录 ────────────────────────────────────
     local KEY_FILE="$CERT_DIR/private.key"
     local CERT_FILE="$CERT_DIR/fullchain.cer"
     local CA_FILE="$CERT_DIR/ca.cer"
 
-    local DETECTED_SVC="" RELOAD_CMD="echo 'cert installed'"
+    # 检测当前运行的 Web 服务，用于 reloadcmd 和 Pre/Post Hook
+    local DETECTED_SVC="" PRE_HOOK="" POST_HOOK=""
+    local RELOAD_CMD="echo 'cert installed'"
     for svc in nginx apache2 httpd lighttpd; do
-        systemctl is-active --quiet "$svc" 2>/dev/null && {
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
             DETECTED_SVC="$svc"
+            PRE_HOOK="systemctl stop $svc"
+            POST_HOOK="systemctl start $svc"
             RELOAD_CMD="systemctl reload $svc"
+            log_info "检测到 Web 服务: $svc，续期将自动停启该服务"
             break
-        }
+        fi
     done
 
     /root/.acme.sh/acme.sh --install-cert -d "$MAIN_DOMAIN" \
-        --key-file "$KEY_FILE" \
+        --key-file  "$KEY_FILE"  \
         --fullchain-file "$CERT_FILE" \
-        --ca-file "$CA_FILE" \
+        --ca-file   "$CA_FILE"   \
         --reloadcmd "$RELOAD_CMD" || { log_error "证书安装失败"; return 1; }
 
-    chmod 600 "$KEY_FILE" 2>/dev/null || true
+    chmod 600 "$KEY_FILE"  2>/dev/null || true
     chmod 644 "$CERT_FILE" "$CA_FILE" 2>/dev/null || true
+    log_success "证书已安装至: $CERT_DIR"
 
-    if ! crontab -l 2>/dev/null | grep -q "acme.sh.*--cron"; then
-        (crontab -l 2>/dev/null; echo "0 2 * * * /root/.acme.sh/acme.sh --cron --home /root/.acme.sh >> /var/log/acme-renew.log 2>&1") | crontab -
-        log_success "自动续期任务已设置（每天 02:00）"
+    # ── 8. 写入 Pre/Post Hook（解决续期时80端口冲突）────────────
+    # acme.sh 续期前自动执行 Le_PreHook 停服务，续期后执行 Le_PostHook 启服务
+    if [[ -n "$PRE_HOOK" ]]; then
+        local CONF_FILE="/root/.acme.sh/${MAIN_DOMAIN}/${MAIN_DOMAIN}.conf"
+        if [[ -f "$CONF_FILE" ]]; then
+            if ! grep -q "Le_PreHook" "$CONF_FILE"; then
+                echo "Le_PreHook='$PRE_HOOK'"   >> "$CONF_FILE"
+                echo "Le_PostHook='$POST_HOOK'" >> "$CONF_FILE"
+                log_success "续期 Hook 已配置（自动停启 $DETECTED_SVC）"
+            else
+                log_info "续期 Hook 已存在，跳过"
+            fi
+        else
+            log_warn "未找到 acme.sh 配置文件: $CONF_FILE"
+            log_warn "请手动追加以下两行到该文件："
+            log_warn "  Le_PreHook='$PRE_HOOK'"
+            log_warn "  Le_PostHook='$POST_HOOK'"
+        fi
+    else
+        log_info "未检测到运行中的 Web 服务，续期将直接 Standalone 绑定80端口"
     fi
 
+    # ── 9. 配置自动续期 crontab ──────────────────────────────────
+    local LOG_FILE="/var/log/acme-renew.log"
+    local CRON_JOB="0 2 * * * /root/.acme.sh/acme.sh --cron --home /root/.acme.sh >> $LOG_FILE 2>&1"
+    if ! crontab -l 2>/dev/null | grep -q "acme.sh.*--cron"; then
+        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
+        log_success "自动续期任务已设置（每天 02:00，日志: $LOG_FILE）"
+    else
+        log_info "自动续期任务已存在，跳过"
+    fi
+
+    # ── 10. 重启 Web 服务 ─────────────────────────────────────────
     manage_web_services_ssl "start"
 
+    # ── 11. 显示结果 ─────────────────────────────────────────────
     echo ""
     log_success "SSL 证书部署完成！"
     echo "  证书目录: $CERT_DIR"
@@ -656,6 +699,14 @@ deploy_ssl() {
         exp=$(openssl x509 -in "$CERT_FILE" -noout -enddate 2>/dev/null | cut -d= -f2)
         echo "  有效期至: $exp"
     fi
+    echo ""
+    echo "  Nginx 配置参考:"
+    echo "    ssl_certificate     $CERT_FILE;"
+    echo "    ssl_certificate_key $KEY_FILE;"
+    echo ""
+    echo "  Apache 配置参考:"
+    echo "    SSLCertificateFile    $CERT_FILE"
+    echo "    SSLCertificateKeyFile $KEY_FILE"
 }
 
 menu_ssl() {
