@@ -490,7 +490,7 @@ deploy_ssl() {
             fi
         fi
         # 直接执行，输出重定向到日志文件（不用管道，避免子shell fd问题）
-        bash "$acme_installer" > "$acme_log" 2>&1
+        bash "$acme_installer" --force > "$acme_log" 2>&1
         local acme_ret=$?
         tail -3 "$acme_log"
         rm -f "$acme_installer" "$acme_log"
