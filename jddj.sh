@@ -476,19 +476,25 @@ deploy_ssl() {
     esac
     mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"
 
-    # 安装 acme.sh（先下载到临时文件再执行，避免 bash <(curl) 的 fd 冲突）
+    # 安装 acme.sh（下载到真实文件，不用管道，避免 bash <(curl) 的 fd 冲突）
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
         local acme_installer="/tmp/acme_install_$$.sh"
-        if curl -fsSL "https://get.acme.sh" -o "$acme_installer" 2>/dev/null ||            wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null; then
-            bash "$acme_installer" 2>&1 | tail -5
-            rm -f "$acme_installer"
-        else
-            rm -f "$acme_installer"
-            log_error "acme.sh 下载失败，请检查网络"
-            return 1
+        local acme_log="/tmp/acme_install_$$.log"
+        # 下载安装脚本
+        if ! curl -fsSL "https://get.acme.sh" -o "$acme_installer" 2>/dev/null; then
+            if ! wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null; then
+                rm -f "$acme_installer"
+                log_error "acme.sh 下载失败，请检查网络"
+                return 1
+            fi
         fi
-        if [[ ! -f /root/.acme.sh/acme.sh ]]; then
+        # 直接执行，输出重定向到日志文件（不用管道，避免子shell fd问题）
+        bash "$acme_installer" > "$acme_log" 2>&1
+        local acme_ret=$?
+        tail -3 "$acme_log"
+        rm -f "$acme_installer" "$acme_log"
+        if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
             log_error "acme.sh 安装失败"
             return 1
         fi
