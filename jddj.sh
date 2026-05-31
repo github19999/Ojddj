@@ -479,22 +479,15 @@ deploy_ssl() {
     # 安装 acme.sh
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        # 直接下载完整压缩包，解压后执行真正的 acme.sh --install --nocron
-        # 避免 get.acme.sh / --install-online 的嵌套下载问题
-        local acme_tmpdir="/tmp/acme_install_$$"
-        mkdir -p "$acme_tmpdir"
-        local acme_tar="$acme_tmpdir/master.tar.gz"
-        if ! curl -fsSL "https://github.com/acmesh-official/acme.sh/archive/master.tar.gz"                 -o "$acme_tar" 2>/dev/null; then
-            wget -qO "$acme_tar"                 "https://github.com/acmesh-official/acme.sh/archive/master.tar.gz" 2>/dev/null || {
-                rm -rf "$acme_tmpdir"
-                log_error "acme.sh 下载失败"
-                return 1
-            }
-        fi
-        tar xzf "$acme_tar" -C "$acme_tmpdir"
-        bash "$acme_tmpdir/acme.sh-master/acme.sh" --install --nocron --home /root/.acme.sh
+        # 写到独立脚本执行，彻底隔离 bash <(curl) 的 fd，与文件6原版逻辑一致
+        local acme_wrapper="/tmp/acme_wrapper_$$.sh"
+        cat > "$acme_wrapper" << 'ACME_WRAPPER'
+#!/bin/bash
+curl https://get.acme.sh | sh
+ACME_WRAPPER
+        bash "$acme_wrapper"
         local acme_ret=$?
-        rm -rf "$acme_tmpdir"
+        rm -f "$acme_wrapper"
         if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
             log_error "acme.sh 安装失败"
             return 1
