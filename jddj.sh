@@ -476,24 +476,25 @@ deploy_ssl() {
     esac
     mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"
 
-    # 安装 acme.sh（下载到真实文件，不用管道，避免 bash <(curl) 的 fd 冲突）
+    # 安装 acme.sh
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
+        # 先确保 cron 在跑，acme.sh 安装时会检查
+        systemctl start cron 2>/dev/null || systemctl start crond 2>/dev/null || true
+        # 下载安装脚本到真实文件（不用管道，避免 bash <(curl) 的 fd 冲突）
         local acme_installer="/tmp/acme_install_$$.sh"
-        local acme_log="/tmp/acme_install_$$.log"
-        # 下载安装脚本
         if ! curl -fsSL "https://get.acme.sh" -o "$acme_installer" 2>/dev/null; then
-            if ! wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null; then
+            wget -qO "$acme_installer" "https://get.acme.sh" 2>/dev/null || {
                 rm -f "$acme_installer"
-                log_error "acme.sh 下载失败，请检查网络"
+                log_error "acme.sh 下载失败"
                 return 1
-            fi
+            }
         fi
-        # 直接执行，输出重定向到日志文件（不用管道，避免子shell fd问题）
-        bash "$acme_installer" --force > "$acme_log" 2>&1
+        # 用 INSTALLONLINE=1 环境变量 + --install 参数，等同于官方推荐安装方式
+        # NO_CRON=1 跳过 cron 检查（我们脚本里已单独配置 cron）
+        bash "$acme_installer" --install --no-cron
         local acme_ret=$?
-        tail -3 "$acme_log"
-        rm -f "$acme_installer" "$acme_log"
+        rm -f "$acme_installer"
         if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
             log_error "acme.sh 安装失败"
             return 1
