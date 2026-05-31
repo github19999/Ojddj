@@ -479,21 +479,22 @@ deploy_ssl() {
     # 安装 acme.sh
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        # 下载 acme.sh 主程序（不是 get.acme.sh 包装脚本）
-        local acme_installer="/tmp/acme_install_$$.sh"
-        if ! curl -fsSL "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"                 -o "$acme_installer" 2>/dev/null; then
-            wget -qO "$acme_installer"                 "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh" 2>/dev/null || {
-                rm -f "$acme_installer"
+        # 直接下载完整压缩包，解压后执行真正的 acme.sh --install --nocron
+        # 避免 get.acme.sh / --install-online 的嵌套下载问题
+        local acme_tmpdir="/tmp/acme_install_$$"
+        mkdir -p "$acme_tmpdir"
+        local acme_tar="$acme_tmpdir/master.tar.gz"
+        if ! curl -fsSL "https://github.com/acmesh-official/acme.sh/archive/master.tar.gz"                 -o "$acme_tar" 2>/dev/null; then
+            wget -qO "$acme_tar"                 "https://github.com/acmesh-official/acme.sh/archive/master.tar.gz" 2>/dev/null || {
+                rm -rf "$acme_tmpdir"
                 log_error "acme.sh 下载失败"
                 return 1
             }
         fi
-        chmod +x "$acme_installer"
-        # --install-online 让 acme.sh 自己下载完整包并安装
-        # --nocron 跳过 crontab 检查（脚本后续单独配置）
-        bash "$acme_installer" --install-online --nocron
+        tar xzf "$acme_tar" -C "$acme_tmpdir"
+        bash "$acme_tmpdir/acme.sh-master/acme.sh" --install --nocron --home /root/.acme.sh
         local acme_ret=$?
-        rm -f "$acme_installer"
+        rm -rf "$acme_tmpdir"
         if [[ $acme_ret -ne 0 ]] || [[ ! -f /root/.acme.sh/acme.sh ]]; then
             log_error "acme.sh 安装失败"
             return 1
