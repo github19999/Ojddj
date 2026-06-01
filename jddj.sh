@@ -1913,6 +1913,14 @@ for ib in inbounds:
     tls_on = tls.get('enabled', False)
     sni = get_sni(tls, addr)
 
+    # 若 TLS 启用且 sni 是域名（非 IP），用域名作为连接地址
+    # 客户端填域名比填 IP 更通用，且与证书 CN 一致
+    def is_ip(s):
+        import re
+        return bool(re.match(r'^[\d.]+$', s) or re.match(r'^[0-9a-fA-F:]+$', s))
+    if tls_on and sni and not is_ip(sni):
+        addr = sni
+
     tag_enc = urlencode(tag)
     users = ib.get('users', [])
     transport = ib.get('transport', {})
@@ -2208,7 +2216,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.5)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.6)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
