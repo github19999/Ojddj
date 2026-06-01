@@ -2011,14 +2011,32 @@ for ib in inbounds:
 
     elif t == 'shadowsocks':
         method = ib.get('method', '')
-        pwd    = ib.get('password', '')
-        if not method or not pwd: continue
-        info = base64.urlsafe_b64encode(f"{method}:{pwd}".encode()).decode().rstrip('=')
+        server_pwd = ib.get('password', '')
+        if not method or not server_pwd: continue
+
+        if method.startswith('2022-'):
+            # SS 2022 格式: base64(method:server_password:user_password)
+            # users 列表里存放用户密钥，取第一个
+            user_pwd = ''
+            if users:
+                user_pwd = users[0].get('password', '')
+            if user_pwd:
+                raw = f"{method}:{server_pwd}:{user_pwd}"
+            else:
+                raw = f"{method}:{server_pwd}"
+            info = base64.urlsafe_b64encode(raw.encode()).decode().rstrip('=')
+            # Clash 用 server_pwd:user_pwd 拼接
+            clash_pwd = f"{server_pwd}:{user_pwd}" if user_pwd else server_pwd
+        else:
+            # 经典 SS 格式: base64(method:password)
+            info = base64.urlsafe_b64encode(f"{method}:{server_pwd}".encode()).decode().rstrip('=')
+            clash_pwd = server_pwd
+
         links.append(f"ss://{info}@{addr}:{port}#{tag_enc}")
 
         cp = {
             'name': tag, 'type': 'ss', 'server': addr, 'port': port,
-            'cipher': method, 'password': pwd, 'udp': True
+            'cipher': method, 'password': clash_pwd, 'udp': True
         }
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
@@ -2216,7 +2234,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.6)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.7)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
