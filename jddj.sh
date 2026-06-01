@@ -1948,6 +1948,10 @@ for ib in inbounds:
             params += f"&security={sec}&sni={sni}&fp=chrome&type={net}&headerType=none"
             if net in ('ws', 'http'):
                 params += f"&path={urlencode(ws_path)}"
+            if net == 'grpc':
+                svc = ib.get('transport', {}).get('service_name', '')
+                if svc:
+                    params += f"&serviceName={urlencode(svc)}"
 
         link = f"vless://{uuid}@{addr}:{port}?{params}#{tag_enc}"
         links.append(link)
@@ -2234,7 +2238,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.7)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.8)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
