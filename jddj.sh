@@ -1035,6 +1035,7 @@ build_vless_reality() {
     ask_val port "listen_port（监听端口，建议 443）" "443"
     ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
 
+    # ── 生成密钥对 ────────────────────────────────────────────
     echo -e "  ${YELLOW}正在生成 REALITY 密钥对...${NC}"
     local keypair_out privkey pubkey
     keypair_out=$(gen_reality_keypair)
@@ -1044,22 +1045,75 @@ build_vless_reality() {
     sid_rand=$(gen_short_id)
     echo ""
 
-    ask_random pk "private_key（REALITY 私钥，服务端用）" "$privkey"
+    # 【修复2】先展示密钥对（private+public 配对显示），再让用户确认/覆盖
+    # 用户若自定义 private_key，需自行提供对应的 public_key
+    echo -e "  ${CYAN}◆ REALITY 密钥对（自动生成，回车直接使用）${NC}"
+    echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
+    echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
+    echo -e "    (若需自定义，请同时替换 Private Key 和对应的 Public Key)"
+    echo ""
+    echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
+    echo -e "    随机生成值: ${YELLOW}${privkey}${NC}"
+    echo -e "    (回车使用随机值，或输入自定义 private_key)"
+    read -rp "  > " _pk_input
+    pk="${_pk_input:-$privkey}"
+    # 若用户自定义了 private_key，public_key 也需手动输入
+    if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
+        echo -e "  ${YELLOW}⚠ 已自定义 private_key，请同时输入对应的 public_key:${NC}"
+        read -rp "  > public_key: " pubkey
+    fi
+    echo -e "  ${GREEN}✓ private_key = ${pk}${NC}"
+    echo -e "  ${GREEN}✓ public_key  = ${pubkey}${NC}"
+    echo ""
+
     ask_random si "short_id（REALITY Short ID）" "$sid_rand"
 
     echo ""
-    echo -e "  ${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
-    echo -e "  ${BOLD}${CYAN}    $pubkey${NC}"
+    echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
+    echo -e "  ${BOLD}${CYAN}    ${pubkey}${NC}"
     echo ""
 
-    # server_name：REALITY 伪装域名，不需要拥有，填公网可访问的 TLS 站点
+    # 【修复1】server_name：优先使用已申请证书的域名（通过 select_server_name 检测）
+    # REALITY 的 server_name 是伪装域名，用自己的真实域名更自然，无需拥有也可
     echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
-    echo -e "    不需要拥有该域名，填公网可访问的 TLS 网站即可"
-    echo -e "    例如: www.microsoft.com  www.apple.com  www.amazon.com"
-    ask_val sn "server_name" "www.microsoft.com"
+    echo -e "    可以填已申请的证书域名（推荐），也可填任意公网 TLS 网站"
+    # 获取已安装证书列表，取最后一个作为默认（对应用户的第二个证书 ccscs2...）
+    local _cert_domains=()
+    mapfile -t _cert_domains < <(get_cert_domains 2>/dev/null)
+    local _default_sn="www.microsoft.com"
+    if [[ ${#_cert_domains[@]} -ge 2 ]]; then
+        # 有多个证书时，取最后一个作为默认
+        _default_sn="${_cert_domains[-1]}"
+    elif [[ ${#_cert_domains[@]} -eq 1 ]]; then
+        _default_sn="${_cert_domains[0]}"
+    fi
 
-    # handshake：固定默认 127.0.0.1:8001（对应本地 nginx/caddy 回环监听）
-    # 若无本地 Web 服务，也可填 server_name 对应的真实 IP
+    if [[ ${#_cert_domains[@]} -gt 0 ]]; then
+        echo -e "    检测到已安装证书，请选择或手动输入："
+        for i in "${!_cert_domains[@]}"; do
+            echo -e "    ${YELLOW}$((i+1)))${NC} ${_cert_domains[$i]}"
+        done
+        local _manual_idx=$(( ${#_cert_domains[@]} + 1 ))
+        echo -e "    ${YELLOW}${_manual_idx})${NC} 手动输入其他域名"
+        echo -e "    (默认选 ${#_cert_domains[@]}，即 ${_default_sn})"
+        echo ""
+        local _sn_choice
+        read -rp "  > (编号，默认 ${#_cert_domains[@]}): " _sn_choice
+        _sn_choice="${_sn_choice:-${#_cert_domains[@]}}"
+        if [[ "$_sn_choice" =~ ^[0-9]+$ ]] &&            [[ "$_sn_choice" -ge 1 ]] &&            [[ "$_sn_choice" -le "${#_cert_domains[@]}" ]]; then
+            sn="${_cert_domains[$((_sn_choice-1))]}"
+        else
+            read -rp "  > 手动输入 server_name (默认 ${_default_sn}): " sn
+            sn="${sn:-$_default_sn}"
+        fi
+    else
+        echo -e "    未检测到已安装证书，请手动输入（或直接回车使用默认）"
+        ask_val sn "server_name" "$_default_sn"
+    fi
+    echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
+    echo ""
+
+    # handshake：默认 127.0.0.1:8001（本机回环）
     echo -e "  ${CYAN}◆ handshake 握手转发目标${NC}"
     echo -e "    默认 127.0.0.1:8001（本机回环，适合同时运行 Web 服务的场景）"
     echo -e "    若无本地 Web 服务，可改为 ${sn}:443 直连握手"
@@ -1623,11 +1677,26 @@ EOF
     echo ""
 
     if command -v sing-box &>/dev/null; then
-        if sing-box check -c /etc/sing-box/config.json 2>/dev/null; then
+        local _check_out
+        _check_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true             sing-box check -c /etc/sing-box/config.json 2>&1)
+        local _check_rc=$?
+        if [[ $_check_rc -eq 0 ]]; then
             log_success "配置语法验证通过"
+            # 若当前版本发出 legacy DNS 弃用警告，提示已内置新格式
+            if echo "$_check_out" | grep -q "legacy DNS"; then
+                log_warn "检测到 sing-box 版本要求新 DNS 格式，已自动写入 udp:// 前缀格式"
+                log_info "如遇问题请升级 sing-box：bash <(curl -fsSL https://sing-box.app/deb-install.sh)"
+            fi
         else
-            log_warn "配置语法验证失败，详细原因："
-            sing-box check -c /etc/sing-box/config.json
+            # 过滤掉纯 legacy DNS 警告行，只展示真正的错误
+            local _real_errors
+            _real_errors=$(echo "$_check_out" | grep -v "legacy DNS\|ENABLE_DEPRECATED" || true)
+            if [[ -z "$_real_errors" ]]; then
+                log_success "配置语法验证通过（DNS 格式兼容性警告已忽略）"
+            else
+                log_warn "配置语法验证失败，详细原因："
+                echo "$_real_errors"
+            fi
         fi
     fi
 
@@ -1662,6 +1731,7 @@ menu_service() {
         echo "  7) 查看是否开机自启"
         echo "  8) 实时查看日志"
         echo "  9) 验证配置文件"
+        echo " 10) 一键修复 DNS 格式（解决 legacy DNS 警告）"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -1687,18 +1757,107 @@ menu_service() {
             8) journalctl -u sing-box -f --no-pager ;;
             9)
                 if command -v sing-box &>/dev/null; then
-                    sing-box check -c /etc/sing-box/config.json && log_success "配置验证通过" || {
-                        log_error "配置验证失败，详细原因："
-                        sing-box check -c /etc/sing-box/config.json
-                    }
+                    local _sc_out
+                    _sc_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true                         sing-box check -c /etc/sing-box/config.json 2>&1)
+                    local _sc_rc=$?
+                    if [[ $_sc_rc -eq 0 ]]; then
+                        log_success "配置验证通过"
+                    else
+                        local _sc_real
+                        _sc_real=$(echo "$_sc_out" | grep -v "legacy DNS\|ENABLE_DEPRECATED" || true)
+                        if [[ -z "$_sc_real" ]]; then
+                            log_success "配置验证通过（DNS 兼容性警告已忽略）"
+                        else
+                            log_error "配置验证失败，详细原因："
+                            echo "$_sc_real"
+                        fi
+                    fi
                 else
                     log_error "sing-box 未安装"
                 fi
                 press_enter ;;
+            10) fix_dns_format; press_enter ;;
             0) return ;;
             *) log_warn "无效选择" ;;
         esac
     done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  修复已有 config.json 的 DNS 格式（sing-box 1.12+ 要求 udp:// 前缀）
+# ────────────────────────────────────────────────────────────────
+fix_dns_format() {
+    local cfg="/etc/sing-box/config.json"
+    [[ ! -f "$cfg" ]] && { log_error "配置文件不存在: $cfg"; return 1; }
+
+    log_step "检查并修复 DNS 格式..."
+
+    # 备份
+    cp "$cfg" "${cfg}.bak.$(date +%Y%m%d_%H%M%S)"
+
+    # 用 python3 修复：给纯 IP/域名地址加 udp:// 前缀，并补充 independent_cache
+    python3 << 'INNEREOF'
+import json, re, sys
+
+cfg_path = "/etc/sing-box/config.json"
+
+with open(cfg_path) as f:
+    raw = f.read()
+
+# 去注释（sing-box 配置里常有 // 注释）
+clean = re.sub(r'(?<![:/])//[^
+]*', '', raw)
+
+try:
+    obj = json.loads(clean)
+except Exception as e:
+    print(f"[ERROR] 解析配置失败: {e}")
+    sys.exit(1)
+
+dns = obj.get("dns", {})
+changed = 0
+
+# 修复 servers 里的 address 字段
+for srv in dns.get("servers", []):
+    addr = srv.get("address", "")
+    # 纯 IP 或域名（不含协议前缀）→ 加 udp://
+    if addr and not addr.startswith(("udp://","tcp://","tls://","https://","h3://","local","rcode://")):
+        srv["address"] = "udp://" + addr
+        changed += 1
+
+# 补充 independent_cache（1.12+ 建议）
+if "independent_cache" not in dns and dns:
+    dns["independent_cache"] = True
+    changed += 1
+
+if changed > 0:
+    obj["dns"] = dns
+    # 重新写入，保留缩进
+    with open(cfg_path, "w") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    print(f"[✓] 已修复 {changed} 处 DNS 格式问题")
+else:
+    print("[INFO] DNS 格式已是最新，无需修复")
+INNEREOF
+
+    echo ""
+    log_step "修复后重新验证..."
+    if command -v sing-box &>/dev/null; then
+        local _out
+        _out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true             sing-box check -c "$cfg" 2>&1)
+        local _rc=$?
+        local _real
+        _real=$(echo "$_out" | grep -v "legacy DNS\|ENABLE_DEPRECATED" | grep -v "^$" || true)
+        if [[ $_rc -eq 0 && -z "$_real" ]]; then
+            log_success "配置验证通过，无任何警告"
+        elif [[ -z "$_real" ]]; then
+            log_success "配置验证通过（DNS 兼容警告已消除）"
+        else
+            log_warn "仍有问题：$_real"
+        fi
+    fi
+
+    log_info "如需生效请重启 sing-box：选项 3"
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -2086,7 +2245,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.3)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.4)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
