@@ -143,25 +143,68 @@ ask() {
 # ────────────────────────────────────────────────────────────────
 get_cert_domains() {
     local domains=()
+
+    # ── 1. 扫描 acme.sh 证书目录 ─────────────────────────────
     if [[ -d /root/.acme.sh ]]; then
         while IFS= read -r dir; do
             local d
             d=$(basename "$dir")
-            # 跳过系统目录和非域名条目
+            # 跳过系统目录、非域名条目、ECC 副本目录
             [[ -z "$d" || "$d" == "__INTERACT__" || "$d" == "ca" || "$d" == "account.conf" ]] && continue
-            # 跳过 acme.sh ECC 证书目录（格式为 domain_ecc，是同域名的副本）
             [[ "$d" == *_ecc ]] && continue
-            [[ -d "$dir" ]] && domains+=("$d")
+            [[ ! -d "$dir" ]] && continue
+
+            # 目录名本身（主域名）加入
+            domains+=("$d")
+
+            # ── 2. 读 .conf 中的 Le_Alt（SAN 附加域名）─────────
+            local conf_file="$dir/${d}.conf"
+            if [[ -f "$conf_file" ]]; then
+                local le_alt
+                le_alt=$(grep -oP "(?<=Le_Alt=')[^']+" "$conf_file" 2>/dev/null || true)
+                if [[ -n "$le_alt" ]]; then
+                    # Le_Alt 格式: "domain1,domain2,..." 或空格分隔
+                    while IFS=, read -ra alt_list; do
+                        for alt in "${alt_list[@]}"; do
+                            alt="${alt// /}"   # 去空格
+                            [[ -n "$alt" && "$alt" == *.* ]] && domains+=("$alt")
+                        done
+                    done <<< "$le_alt"
+                fi
+            fi
+
+            # ── 3. 读证书文件中的 SAN extension ─────────────────
+            local cert_file="$dir/fullchain.cer"
+            [[ ! -f "$cert_file" ]] && cert_file="$dir/${d}.cer"
+            if [[ -f "$cert_file" ]]; then
+                while IFS= read -r san; do
+                    san="${san#DNS:}"
+                    san="${san// /}"
+                    [[ -n "$san" && "$san" == *.* && "$san" != *\** ]] && domains+=("$san")
+                done < <(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null                     | grep -oP "DNS:[^,\s]+" | tr ',' '
+')
+            fi
+
         done < <(find /root/.acme.sh -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
+
+    # ── 4. 扫描系统常见证书目录 ──────────────────────────────
     while IFS= read -r crt; do
         [[ -z "$crt" ]] && continue
+        # 读 CN
         local cn
-        cn=$(openssl x509 -in "$crt" -noout -subject 2>/dev/null | grep -oP '(?<=CN\s=\s)[^,/]+' | head -1)
-        [[ -n "$cn" ]] && domains+=("$cn")
+        cn=$(openssl x509 -in "$crt" -noout -subject 2>/dev/null             | grep -oP '(?<=CN\s=\s)[^,/]+' | head -1)
+        [[ -n "$cn" && "$cn" == *.* ]] && domains+=("$cn")
+        # 读 SAN
+        while IFS= read -r san; do
+            san="${san#DNS:}"
+            san="${san// /}"
+            [[ -n "$san" && "$san" == *.* && "$san" != *\** ]] && domains+=("$san")
+        done < <(openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null             | grep -oP "DNS:[^,\s]+" | tr ',' '\n')
     done < <(find /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl 2>/dev/null \
-        \( -name "*.crt" -o -name "fullchain.cer" -o -name "*.pem" \) | head -20)
-    # 去重、过滤通配符、过滤无点号条目
+        \( -name "*.crt" -o -name "fullchain.cer" -o -name "*.pem" \) | head -30)
+
+    # ── 5. 去重、过滤通配符和无点号条目、排序 ──────────────────
     printf '%s\n' "${domains[@]}" | sort -u | grep -v '^\*' | grep '\.' || true
 }
 
@@ -2043,7 +2086,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.2)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.3)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
