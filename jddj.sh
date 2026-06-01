@@ -1137,12 +1137,19 @@ build_vless_reality() {
             "server_port": $hs_port
           },
           "private_key": "$pk",
-          "public_key": "$pubkey",
           "short_id": ["$si"]
         }
       }
     }
 EOF
+    # public_key 不属于服务端配置，单独保存到辅助文件供生成链接时读取
+    local _reality_meta="/etc/sing-box/reality_meta.conf"
+    # 追加/更新（按 listen_port 区分，支持多个 REALITY inbound）
+    # 格式: port:public_key
+    grep -v "^${port}:" "$_reality_meta" 2>/dev/null > "${_reality_meta}.tmp" || true
+    echo "${port}:${pubkey}" >> "${_reality_meta}.tmp"
+    mv "${_reality_meta}.tmp" "$_reality_meta"
+    log_success "public_key 已保存至 $_reality_meta（供生成链接时使用）"
 }
 
 # 5. VMess TCP
@@ -1938,7 +1945,18 @@ for ib in inbounds:
         reality_on = reality.get('enabled', False)
 
         if reality_on:
-            pbk = reality.get('public_key', '')
+            # public_key 不存在于服务端 config（inbound 只有 private_key）
+            # 从配置时保存的辅助文件 reality_meta.conf 里按端口读取
+            pbk = ''
+            try:
+                with open('/etc/sing-box/reality_meta.conf') as _mf:
+                    for _line in _mf:
+                        _line = _line.strip()
+                        if _line.startswith(f"{port}:"):
+                            pbk = _line.split(':', 1)[1]
+                            break
+            except Exception:
+                pass
             sid_val = reality.get('short_id', [''])
             sid = sid_val[0] if isinstance(sid_val, list) else sid_val
             params = f"encryption=none&flow={flow}&security=reality&sni={sni}&fp=chrome&pbk={urlencode(pbk)}&sid={sid}&type=tcp&headerType=none"
@@ -2239,7 +2257,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.9)            ║"
+        echo "║          服务器一键管理脚本  (jddj v2.0)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
