@@ -1636,24 +1636,6 @@ configure_singbox() {
     "output": "/var/log/sing-box/sing-box.log"
   },
 
-  "dns": {
-    "servers": [
-      {
-        "tag": "dns-local",
-        "address": "udp://223.5.5.5",
-        "detour": "direct"
-      },
-      {
-        "tag": "dns-remote",
-        "address": "udp://8.8.8.8",
-        "detour": "direct"
-      }
-    ],
-    "rules": [],
-    "final": "dns-local",
-    "independent_cache": true
-  },
-
   "inbounds": [
 $INBOUNDS_JSON
   ],
@@ -1661,15 +1643,7 @@ $INBOUNDS_JSON
   "outbounds": [
     {"type": "direct", "tag": "direct"},
     {"type": "block",  "tag": "block"}
-  ],
-
-  "route": {
-    "rules": [
-      {"geoip": ["private"], "outbound": "block"}
-    ],
-    "final": "direct",
-    "auto_detect_interface": true
-  }
+  ]
 }
 EOF
 
@@ -1790,74 +1764,63 @@ fix_dns_format() {
     local cfg="/etc/sing-box/config.json"
     [[ ! -f "$cfg" ]] && { log_error "配置文件不存在: $cfg"; return 1; }
 
-    log_step "检查并修复 DNS 格式..."
-
-    # 备份
+    log_step "修复旧版 config.json（移除 geoip/dns/route，兼容 sing-box 1.12+）..."
     cp "$cfg" "${cfg}.bak.$(date +%Y%m%d_%H%M%S)"
+    log_info "已备份原文件"
 
-    # 用 python3 修复：给纯 IP/域名地址加 udp:// 前缀，并补充 independent_cache
     python3 << 'INNEREOF'
 import json, re, sys
 
 cfg_path = "/etc/sing-box/config.json"
-
 with open(cfg_path) as f:
     raw = f.read()
 
-# 去注释（sing-box 配置里常有 // 注释）
-clean = re.sub(r'(?<![:/])//[^
-]*', '', raw)
-
+clean = re.sub(r'(?<![:/])//[^\n]*', '', raw)
 try:
     obj = json.loads(clean)
 except Exception as e:
     print(f"[ERROR] 解析配置失败: {e}")
     sys.exit(1)
 
-dns = obj.get("dns", {})
-changed = 0
+changed = []
 
-# 修复 servers 里的 address 字段
-for srv in dns.get("servers", []):
-    addr = srv.get("address", "")
-    # 纯 IP 或域名（不含协议前缀）→ 加 udp://
-    if addr and not addr.startswith(("udp://","tcp://","tls://","https://","h3://","local","rcode://")):
-        srv["address"] = "udp://" + addr
-        changed += 1
+if "dns" in obj:
+    del obj["dns"]
+    changed.append("移除 dns 段")
 
-# 补充 independent_cache（1.12+ 建议）
-if "independent_cache" not in dns and dns:
-    dns["independent_cache"] = True
-    changed += 1
+if "route" in obj:
+    del obj["route"]
+    changed.append("移除 route 段（含 geoip 规则）")
 
-if changed > 0:
-    obj["dns"] = dns
-    # 重新写入，保留缩进
+if "outbounds" not in obj:
+    obj["outbounds"] = [
+        {"type": "direct", "tag": "direct"},
+        {"type": "block",  "tag": "block"}
+    ]
+    changed.append("补充 outbounds")
+
+if changed:
     with open(cfg_path, "w") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
-    print(f"[✓] 已修复 {changed} 处 DNS 格式问题")
+    print("[✓] 修复内容: " + " / ".join(changed))
 else:
-    print("[INFO] DNS 格式已是最新，无需修复")
+    print("[INFO] 配置已是最新格式，无需修复")
 INNEREOF
 
     echo ""
-    log_step "修复后重新验证..."
+    log_step "修复后验证..."
     if command -v sing-box &>/dev/null; then
-        local _out
-        _out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true             sing-box check -c "$cfg" 2>&1)
-        local _rc=$?
-        local _real
-        _real=$(echo "$_out" | grep -v "legacy DNS\|ENABLE_DEPRECATED" | grep -v "^$" || true)
-        if [[ $_rc -eq 0 && -z "$_real" ]]; then
-            log_success "配置验证通过，无任何警告"
-        elif [[ -z "$_real" ]]; then
-            log_success "配置验证通过（DNS 兼容警告已消除）"
+        local _out _rc
+        _out=$(sing-box check -c "$cfg" 2>&1)
+        _rc=$?
+        if [[ $_rc -eq 0 ]]; then
+            log_success "配置验证通过"
         else
-            log_warn "仍有问题：$_real"
+            log_warn "验证结果："
+            echo "$_out"
         fi
     fi
-
-    log_info "如需生效请重启 sing-box：选项 3"
+    log_info "修复完成，请选择「3) 重启 sing-box」使配置生效"
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -2245,7 +2208,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v1.4)            ║"
+        echo "║          服务器一键管理脚本  (jddj v1.5)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
