@@ -1193,13 +1193,11 @@ setup_nginx_reality() {
     local domain="$1"
     log_step "配置 Nginx REALITY 回落（域名: ${domain}）..."
 
-    # 确保 Nginx 已安装
     if ! command -v nginx &>/dev/null; then
         log_warn "Nginx 未安装，跳过自动配置（可在「三、安装服务」中安装 Nginx 后重新配置）"
         return
     fi
 
-    # 确保 /var/www/html/index.html 存在
     mkdir -p /var/www/html
     if [[ ! -f /var/www/html/index.html ]]; then
         cat > /var/www/html/index.html << 'HTML'
@@ -1211,7 +1209,6 @@ HTML
     chmod 755 /var/www/html
     log_success "已设置 /var/www/html 权限"
 
-    # 自动定位证书路径
     local cert_path="" key_path=""
     for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
         [[ -f "$d/fullchain.cer" ]] && cert_path="$d/fullchain.cer" && break
@@ -1224,9 +1221,14 @@ HTML
     cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
     key_path="${key_path:-/etc/ssl/private/private.key}"
 
-    # 写入 nginx.conf
-    cat > /etc/nginx/nginx.conf << NGINXEOF
-user root;
+    # 用 python3 写入 nginx.conf，完全绕开 bash heredoc 的转义问题
+    python3 -c "
+import sys
+domain = sys.argv[1]
+cert   = sys.argv[2]
+key    = sys.argv[3]
+
+cfg = '''user root;
 worker_processes auto;
 error_log /var/log/nginx/error.log notice;
 pid /var/run/nginx.pid;
@@ -1236,23 +1238,23 @@ events {
 }
 
 http {
-    log_format main '[\$time_local] \$proxy_protocol_addr "\$http_referer" "\$http_user_agent"';
+    log_format main \'[$time_local] $proxy_protocol_addr \"$http_referer\" \"$http_user_agent\"\';
     access_log /var/log/nginx/access.log main;
 
     map \$http_upgrade \$connection_upgrade {
         default upgrade;
-        ""      close;
+        \"\"      close;
     }
 
     map \$proxy_protocol_addr \$proxy_forwarded_elem {
-        ~^[0-9.]+\$        "for=\$proxy_protocol_addr";
-        ~^[0-9A-Fa-f:.]+\$ "for="[\$proxy_protocol_addr]"";
-        default           "for=unknown";
+        ~^[0-9.]+\$        \"for=\$proxy_protocol_addr\";
+        ~^[0-9A-Fa-f:.]+\$ \"for=\\\"[\$proxy_protocol_addr]\\\"\";
+        default           \"for=unknown\";
     }
 
     map \$http_forwarded \$proxy_add_forwarded {
-        "~^(,[ \t]*)*([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?(;([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?)*([ \t]*,([ \t]*([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?(;([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?)*)?)*\$" "\$http_forwarded, \$proxy_forwarded_elem";
-        default "\$proxy_forwarded_elem";
+        \"~^(,[ \\\\t]*)*([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+|\\\"([\\\\t \\\\x21\\\\x23-\\\\x5B\\\\x5D-\\\\x7E\\\\x80-\\\\xFF]|\\\\\\\\[\\\\t \\\\x21-\\\\x7E\\\\x80-\\\\xFF])*\\\"))?(;([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+|\\\"([\\\\t \\\\x21\\\\x23-\\\\x5B\\\\x5D-\\\\x7E\\\\x80-\\\\xFF]|\\\\\\\\[\\\\t \\\\x21-\\\\x7E\\\\x80-\\\\xFF])*\\\"))?)*([ \\\\t]*,([ \\\\t]*([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+|\\\"([\\\\t \\\\x21\\\\x23-\\\\x5B\\\\x5D-\\\\x7E\\\\x80-\\\\xFF]|\\\\\\\\[\\\\t \\\\x21-\\\\x7E\\\\x80-\\\\xFF])*\\\"))?(;([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&\'*+.^_\`|~0-9A-Za-z-]+|\\\"([\\\\t \\\\x21\\\\x23-\\\\x5B\\\\x5D-\\\\x7E\\\\x80-\\\\xFF]|\\\\\\\\[\\\\t \\\\x21-\\\\x7E\\\\x80-\\\\xFF])*\\\"))?)*)?)*\$\" \"\$http_forwarded, \$proxy_forwarded_elem\";
+        default \"\$proxy_forwarded_elem\";
     }
 
     server {
@@ -1262,15 +1264,15 @@ http {
     }
 
     server {
-        listen                     127.0.0.1:8001 ssl;
+        listen                     127.0.0.1:8001 ssl http2;
 
         set_real_ip_from           127.0.0.1;
         real_ip_header             proxy_protocol;
 
-        server_name                ${domain};
+        server_name                ''' + domain + ''';
 
-        ssl_certificate            ${cert_path};
-        ssl_certificate_key        ${key_path};
+        ssl_certificate            ''' + cert + ''';
+        ssl_certificate_key        ''' + key + ''';
 
         ssl_protocols              TLSv1.2 TLSv1.3;
         ssl_ciphers                TLS13_AES_128_GCM_SHA256:TLS13_AES_256_GCM_SHA384:TLS13_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
@@ -1288,14 +1290,18 @@ http {
             try_files \$uri \$uri/ =404;
         }
 
-        location ~* \.(php|asp|aspx|jsp|cgi)\$ {
+        location ~* \\.(php|asp|aspx|jsp|cgi)\$ {
             return 404;
         }
     }
 }
-NGINXEOF
+'''
 
-    # 验证并重载 Nginx
+with open('/etc/nginx/nginx.conf', 'w') as f:
+    f.write(cfg)
+print('nginx.conf 写入完成')
+" "$domain" "$cert_path" "$key_path"
+
     if nginx -t 2>/dev/null; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
         log_success "Nginx REALITY 回落配置已写入并重载"
@@ -1304,7 +1310,7 @@ NGINXEOF
         log_info "  域名: ${domain}"
         log_info "  回落端口: 127.0.0.1:8001"
     else
-        log_warn "Nginx 配置语法有误，请手动检查 /etc/nginx/nginx.conf"
+        log_warn "Nginx 配置语法有误，详细原因："
         nginx -t
     fi
 }
@@ -2455,7 +2461,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v2.1)            ║"
+        echo "║          服务器一键管理脚本  (jddj v2.2)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
