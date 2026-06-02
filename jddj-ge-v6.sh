@@ -7,16 +7,14 @@
 # 【本次优化内容 (jddj-ge-v6)】
 #   1. 彻底修复退出后输入快捷命令 jddj 提示 Permission denied (权限不足) 的问题。
 #      (优先本地直接拷贝并强制提权，杜绝网络问题导致的脚本损坏)。
-#   2. 重构 sing-box 安装逻辑，引入 4 重 fallback 链保底安装：
+#   2. 重构 sing-box 安装逻辑，引入多重 fallback 链保底安装：
 #      [1] 官方 APT/DNF 仓库源安装 (优先级最高，最规范稳定)
-#      [2] 官方最新 install.sh 脚本安装
-#      [3] 官方旧版 deb/rpm 脚本安装
-#      [4] GitHub API 拉取最新 Release 二进制压缩包直装 (终极兜底)
+#      [2] 官方一键脚本安装 (支持最新 install.sh 与旧版 deb/rpm.sh)
+#      [3] GitHub API 拉取最新 Release 二进制压缩包直装 (终极兜底)
 #   3. 继承 v5 的全自动默认配置、端口 443 优化与优雅退出提示功能。
 # ================================================================
 
-# 遇到错误立即退出（你原脚本的设定，在关键部署中触发）
-# 注意：在菜单循环中，我们会通过合理的逻辑控制避免其意外退出
+# 遇到错误立即退出
 set -e  
 
 # ────────────────────────────────────────────────────────────────
@@ -61,31 +59,40 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (优化1：彻底解决 Permission Denied)
+#  安装 jddj 快捷命令 (已深度优化，杜绝 Permission denied)
 # ────────────────────────────────────────────────────────────────
 JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
 
 install_self() {
     local TARGET="/usr/local/bin/jddj"
     
-    # 1. 检查是否已经在目标路径执行
+    # 1. 防止无限覆盖运行中的自身
     if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$TARGET" ]]; then
+        chmod 755 "$TARGET" 2>/dev/null || true
+        return
+    fi
+
+    # 2. 准备目录并删除可能引起权限冲突的旧文件
+    mkdir -p /usr/local/bin
+    rm -rf "$TARGET"
+
+    # 3. 复制本地代码或远程拉取
+    if [[ -f "$0" ]] && grep -q "jddj" "$0" 2>/dev/null; then
+        # 如果是作为普通文件运行 (如 bash xxx.sh)，直接将自身内容写入系统路径
+        cat "$0" > "$TARGET" 2>/dev/null || true
+    else
+        # 如果是管道化执行 (如 curl | bash)，则从远程拉取
+        if command -v curl &>/dev/null; then
+            curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null || true
+        else
+            wget -qO "$TARGET" "$JDDJ_REMOTE_URL" 2>/dev/null || true
+        fi
+    fi
+
+    # 4. 强制最高执行赋权
+    if [[ -f "$TARGET" ]]; then
         chmod +x "$TARGET" 2>/dev/null || true
-        return
-    fi
-
-    # 2. 优先：如果是从本地文件执行的，直接复制本体 (解决网络拉取损坏和权限不足)
-    if [[ -f "$0" && -s "$0" ]]; then
-        cp -f "$0" "$TARGET" 2>/dev/null
-        chmod +x "$TARGET" 2>/dev/null
-        return
-    fi
-
-    # 3. 兜底：如果是 curl | bash 等管道执行，从远程拉取并严格赋权
-    if curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null; then
-        chmod +x "$TARGET" 2>/dev/null
-    elif wget -qO "$TARGET" "$JDDJ_REMOTE_URL" 2>/dev/null; then
-        chmod +x "$TARGET" 2>/dev/null
+        chmod 755 "$TARGET" 2>/dev/null || true
     fi
 }
 
@@ -284,7 +291,7 @@ select_server_name() {
             echo -e "    ${YELLOW}$((i+1)))${NC} ${domains[$i]}"
         done
         local manual_idx=$(( ${#domains[@]} + 1 ))
-        echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入"
+        echo -e "    ${YELLOW}${manual_idx})${NC} 手录输入"
         echo ""
         local sn_choice
         read -rp "  > (编号，默认 1): " sn_choice
@@ -924,12 +931,48 @@ menu_ssl() {
 # ────────────────────────────────────────────────────────────────
 #  三、安装服务（sing-box / Nginx）(优化2：引入4重 fallback)
 # ────────────────────────────────────────────────────────────────
+setup_singbox_service() {
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
+
+    if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
+        cat > /etc/systemd/system/sing-box.service << 'EOF'
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=/var/lib/sing-box
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+ExecStart=/usr/bin/sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+    fi
+
+    if command -v sing-box &>/dev/null; then
+        local ver
+        ver=$(sing-box version 2>/dev/null | head -1)
+        log_success "sing-box 当前状态验证通过: $ver"
+    else
+        log_error "sing-box 安装校验失败"
+    fi
+}
+
 install_singbox_latest() {
-    log_step "尝试 1/4：官方 APT/DNF 仓库源安装 (最稳定)..."
+    log_step "尝试 1/4：官方 APT/DNF 仓库源安装 (优先级最高，最稳定)..."
     local repo_success=false
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt-get update -y >/dev/null 2>&1 || true
-        apt-get install -y curl gnupg2 ca-certificates >/dev/null 2>&1 || true
+        apt-get install -y curl gnupg2 ca-certificates lsb-release >/dev/null 2>&1 || true
         mkdir -p /etc/apt/keyrings
         if curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc 2>/dev/null; then
             chmod a+r /etc/apt/keyrings/sagernet.asc
@@ -938,7 +981,7 @@ install_singbox_latest() {
             if apt-get install -y sing-box >/dev/null 2>&1; then repo_success=true; fi
         fi
     elif [[ "$PKG_MANAGER" == "yum" || "$PKG_MANAGER" == "dnf" ]]; then
-        $PKG_MANAGER install -y curl yum-utils >/dev/null 2>&1 || true
+        $PKG_MANAGER install -y curl yum-utils epel-release >/dev/null 2>&1 || true
         if command -v yum-config-manager &>/dev/null; then
             yum-config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 || true
         elif command -v dnf &>/dev/null; then
@@ -947,24 +990,24 @@ install_singbox_latest() {
         if $PKG_MANAGER install -y sing-box >/dev/null 2>&1; then repo_success=true; fi
     fi
 
-    if [[ "$repo_success" == "true" ]]; then
+    if [[ "$repo_success" == "true" && -x "$(command -v sing-box)" ]]; then
         log_success "APT/DNF 仓库包安装成功"
         return 0
     fi
 
-    log_warn "方式 1 失败，尝试 2/4：官方最新 install.sh 安装..."
+    log_warn "方式 1 失败，尝试 2/4：官方一键安装脚本 (install.sh)..."
     if curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1; then
-        log_success "install.sh 脚本安装成功"
+        log_success "最新 install.sh 脚本安装成功"
         return 0
     fi
 
-    log_warn "方式 2 失败，尝试 3/4：官方旧版 deb/rpm 脚本安装..."
+    log_warn "方式 2 失败，尝试 3/4：官方旧版安装脚本 (deb/rpm)..."
     if bash <(curl -fsSL https://sing-box.app/deb-install.sh) >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) >/dev/null 2>&1; then
-        log_success "旧版脚本安装成功"
+        log_success "旧版 deb/rpm 脚本安装成功"
         return 0
     fi
 
-    log_warn "方式 3 失败，尝试 4/4：GitHub API 直链拉取 Release 二进制..."
+    log_warn "方式 3 失败，尝试 4/4：GitHub API 兜底拉取最新 Release 二进制..."
     local ARCH
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -987,12 +1030,12 @@ install_singbox_latest() {
         fi
     fi
 
-    log_error "所有 4 种安装方式均失败，请检查服务器的国际网络连通性。"
+    log_error "所有安装方式均失败，请检查服务器网络！"
     return 1
 }
 
 install_singbox_beta() {
-    log_step "尝试 1/3：官方 install.sh 脚本安装 Beta..."
+    log_step "尝试 1/3：官方最新 install.sh 安装 Beta..."
     if curl -fsSL https://sing-box.app/install.sh | bash -s -- --beta >/dev/null 2>&1; then
         log_success "Beta 版脚本安装成功"
         return 0
@@ -1069,7 +1112,7 @@ menu_install_service() {
                         *) ARCH_STR="amd64" ;;
                     esac
                     local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
-                    if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz || wget -qO /tmp/sing-box.tar.gz "$URL"; then
+                    if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz 2>/dev/null || wget -qO /tmp/sing-box.tar.gz "$URL" 2>/dev/null; then
                         tar -xzf /tmp/sing-box.tar.gz -C /tmp/
                         install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
                         rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
@@ -1080,40 +1123,7 @@ menu_install_service() {
                 elif [[ "$vc" == "3" ]]; then
                     install_singbox_beta || { press_enter; continue; }
                 fi
-
-                mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
-
-                if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
-                    cat > /etc/systemd/system/sing-box.service << 'EOF'
-[Unit]
-Description=sing-box service
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
-
-[Service]
-User=root
-WorkingDirectory=/var/lib/sing-box
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-ExecStart=/usr/bin/sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-                    systemctl daemon-reload
-                fi
-
-                if command -v sing-box &>/dev/null; then
-                    local ver
-                    ver=$(sing-box version 2>/dev/null | head -1)
-                    log_success "sing-box 当前版本: $ver"
-                else
-                    log_error "sing-box 安装校验失败"
-                fi
+                setup_singbox_service
                 press_enter
                 ;;
             *) log_warn "无效选择"; sleep 1 ;;
@@ -1306,7 +1316,6 @@ build_vless_reality() {
 
     local port uuid pk si sn hs_server hs_port
 
-    # 优化1：REALITY 监听端口默认 443
     ask_val port "listen_port（监听端口，建议 443）" "443"
     ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
 
@@ -2117,7 +2126,7 @@ menu_service() {
         echo -e "  ${CYAN}── sing-box ──${NC}"
         echo "  1) 启动 sing-box"
         echo "  2) 停止 sing-box"
-        echo "  3) 重重启 sing-box 并查看状态"
+        echo "  3) 重启 sing-box 并查看状态"
         echo "  4) 查看完整状态 (systemctl status)"
         echo "  5) 设为开机自启"
         echo "  6) 取消开机自启"
@@ -2666,8 +2675,8 @@ run_all() {
 
     echo ""
     echo -e "${BLUE}── 步骤 3：安装 sing-box ──${NC}"
-    bash <(curl -fsSL https://sing-box.app/deb-install.sh) 2>/dev/null || true
-    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
+    install_singbox_latest
+    setup_singbox_service
 
     echo ""
     echo -e "${BLUE}── 步骤 4：配置 sing-box ──${NC}"
@@ -2707,7 +2716,8 @@ main_menu() {
         echo "══════════════════════════════════════════════════════"
         echo "   0. 退出"
         echo ""
-        read -rp "请选择: " opt
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
         case $opt in
             1) detect_distro; menu_basic ;;
             2) menu_ssl ;;
