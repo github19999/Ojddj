@@ -786,19 +786,27 @@ menu_ssl() {
 
 # ────────────────────────────────────────────────────────────────
 #  ══════════════════════════════════════════════════════════════
-#  三、安装 sing-box
+#  三、安装服务（sing-box / Nginx）
 #  ══════════════════════════════════════════════════════════════
 # ────────────────────────────────────────────────────────────────
 
 install_singbox() {
     clear
-    echo -e "${BOLD}${CYAN}══ 三、安装 sing-box ══${NC}"
+    echo -e "${BOLD}${CYAN}══ 三、安装服务 ══${NC}"
     echo ""
+    echo -e "  ${CYAN}── sing-box ──${NC}"
     echo "  1) Latest 稳定版 [默认]"
     echo "  2) 指定版本号"
     echo "  3) Beta / 预发布版"
     echo ""
-    read -rp "请选择 (1-3): " vc; vc=${vc:-1}
+    echo -e "  ${CYAN}── Nginx ──${NC}"
+    echo "  4) 安装 Nginx"
+    echo ""
+    echo "  0) 返回主菜单"
+    echo ""
+    read -rp "请选择 (0-4): " vc; vc=${vc:-1}
+    [[ "$vc" == "0" ]] && return
+    [[ "$vc" == "4" ]] && { install_nginx; return; }
 
     case $vc in
         1)
@@ -869,6 +877,33 @@ EOF
     press_enter
 }
 
+# ── Nginx 安装 ───────────────────────────────────────────────
+install_nginx() {
+    log_step "安装 Nginx..."
+    if command -v nginx &>/dev/null; then
+        local ver
+        ver=$(nginx -v 2>&1 | head -1)
+        log_info "Nginx 已安装: $ver"
+        read -rp "是否重新安装？(y/N): " yn
+        [[ "${yn,,}" != "y" ]] && return
+    fi
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        apt update -y && apt install -y nginx
+    else
+        $PKG_MANAGER install -y nginx
+    fi
+    mkdir -p /var/www/html
+    if [[ ! -f /var/www/html/index.html ]]; then
+        cat > /var/www/html/index.html << 'HTML'
+<!DOCTYPE html><html><head><title>Welcome</title></head>
+<body><h1>It works!</h1></body></html>
+HTML
+    fi
+    systemctl enable nginx && systemctl start nginx
+    systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
+    press_enter
+}
+
 # ────────────────────────────────────────────────────────────────
 #  ══════════════════════════════════════════════════════════════
 #  四、配置 sing-box  —  各协议 build_* 函数
@@ -892,7 +927,7 @@ build_vless_tcp() {
     local tag port uuid uname flow_choice flow
 
     ask_val   tag   "tag（inbound 标识）"  "vless-tcp-in"
-    ask_val   port  "listen_port（监听端口）" "1443"
+    ask_val   port  "listen_port（监听端口）" "47790"
     ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
     ask_val   uname "name（用户名）" "user-vless-tcp"
 
@@ -946,7 +981,7 @@ build_vless_ws() {
     local tag port uuid wspath
 
     ask_val   tag    "tag（inbound 标识）"    "vless-ws-in"
-    ask_val   port   "listen_port（监听端口）" "8443"
+    ask_val   port   "listen_port（监听端口）" "47791"
     ask_random uuid  "uuid（用户 UUID）"       "$(gen_uuid)"
     ask_val   wspath "ws path（WebSocket 路径）" "/vless-ws"
 
@@ -990,7 +1025,7 @@ build_vless_grpc() {
     local tag port uuid svcname
 
     ask_val   tag     "tag（inbound 标识）"     "vless-grpc-in"
-    ask_val   port    "listen_port（监听端口）"  "8444"
+    ask_val   port    "listen_port（监听端口）"  "47792"
     ask_random uuid   "uuid（用户 UUID）"        "$(gen_uuid)"
     ask_val   svcname "service_name（gRPC 服务名）" "vless-grpc-service"
 
@@ -1032,7 +1067,7 @@ build_vless_reality() {
 
     local port uuid pk si sn hs_server hs_port
 
-    ask_val port "listen_port（监听端口，建议 443）" "443"
+    ask_val port "listen_port（监听端口，建议 443）" "47793"
     ask_random uuid "uuid（用户 UUID）" "$(gen_uuid)"
 
     # ── 生成密钥对 ────────────────────────────────────────────
@@ -1081,10 +1116,8 @@ build_vless_reality() {
     local _cert_domains=()
     mapfile -t _cert_domains < <(get_cert_domains 2>/dev/null)
     local _default_sn="www.microsoft.com"
-    if [[ ${#_cert_domains[@]} -ge 2 ]]; then
-        # 有多个证书时，取最后一个作为默认
-        _default_sn="${_cert_domains[-1]}"
-    elif [[ ${#_cert_domains[@]} -eq 1 ]]; then
+    if [[ ${#_cert_domains[@]} -ge 1 ]]; then
+        # 默认选第1个证书域名
         _default_sn="${_cert_domains[0]}"
     fi
 
@@ -1095,11 +1128,11 @@ build_vless_reality() {
         done
         local _manual_idx=$(( ${#_cert_domains[@]} + 1 ))
         echo -e "    ${YELLOW}${_manual_idx})${NC} 手动输入其他域名"
-        echo -e "    (默认选 ${#_cert_domains[@]}，即 ${_default_sn})"
+        echo -e "    (默认选 1，即 ${_default_sn})"
         echo ""
         local _sn_choice
-        read -rp "  > (编号，默认 ${#_cert_domains[@]}): " _sn_choice
-        _sn_choice="${_sn_choice:-${#_cert_domains[@]}}"
+        read -rp "  > (编号，默认 1): " _sn_choice
+        _sn_choice="${_sn_choice:-1}"
         if [[ "$_sn_choice" =~ ^[0-9]+$ ]] &&            [[ "$_sn_choice" -ge 1 ]] &&            [[ "$_sn_choice" -le "${#_cert_domains[@]}" ]]; then
             sn="${_cert_domains[$((_sn_choice-1))]}"
         else
@@ -1144,12 +1177,136 @@ build_vless_reality() {
 EOF
     # public_key 不属于服务端配置，单独保存到辅助文件供生成链接时读取
     local _reality_meta="/etc/sing-box/reality_meta.conf"
-    # 追加/更新（按 listen_port 区分，支持多个 REALITY inbound）
-    # 格式: port:public_key
     grep -v "^${port}:" "$_reality_meta" 2>/dev/null > "${_reality_meta}.tmp" || true
     echo "${port}:${pubkey}" >> "${_reality_meta}.tmp"
     mv "${_reality_meta}.tmp" "$_reality_meta"
     log_success "public_key 已保存至 $_reality_meta（供生成链接时使用）"
+
+    # 优化5：自动写入 Nginx REALITY 回落配置
+    setup_nginx_reality "$sn"
+}
+
+# ────────────────────────────────────────────────────────────────
+#  REALITY Nginx 回落配置写入函数
+# ────────────────────────────────────────────────────────────────
+setup_nginx_reality() {
+    local domain="$1"
+    log_step "配置 Nginx REALITY 回落（域名: ${domain}）..."
+
+    # 确保 Nginx 已安装
+    if ! command -v nginx &>/dev/null; then
+        log_warn "Nginx 未安装，跳过自动配置（可在「三、安装服务」中安装 Nginx 后重新配置）"
+        return
+    fi
+
+    # 确保 /var/www/html/index.html 存在
+    mkdir -p /var/www/html
+    if [[ ! -f /var/www/html/index.html ]]; then
+        cat > /var/www/html/index.html << 'HTML'
+<!DOCTYPE html><html><head><title>Welcome</title></head>
+<body><h1>It works!</h1></body></html>
+HTML
+    fi
+    chmod 644 /var/www/html/index.html
+    chmod 755 /var/www/html
+    log_success "已设置 /var/www/html 权限"
+
+    # 自动定位证书路径
+    local cert_path="" key_path=""
+    for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
+        [[ -f "$d/fullchain.cer" ]] && cert_path="$d/fullchain.cer" && break
+    done
+    for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
+        [[ -f "$d/private.key" ]] && key_path="$d/private.key" && break
+    done
+    [[ -z "$cert_path" && -f "/root/.acme.sh/${domain}/fullchain.cer" ]] && cert_path="/root/.acme.sh/${domain}/fullchain.cer"
+    [[ -z "$key_path"  && -f "/root/.acme.sh/${domain}/${domain}.key" ]] && key_path="/root/.acme.sh/${domain}/${domain}.key"
+    cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
+    key_path="${key_path:-/etc/ssl/private/private.key}"
+
+    # 写入 nginx.conf
+    cat > /etc/nginx/nginx.conf << NGINXEOF
+user root;
+worker_processes auto;
+error_log /var/log/nginx/error.log notice;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    log_format main '[\$time_local] \$proxy_protocol_addr "\$http_referer" "\$http_user_agent"';
+    access_log /var/log/nginx/access.log main;
+
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        ""      close;
+    }
+
+    map \$proxy_protocol_addr \$proxy_forwarded_elem {
+        ~^[0-9.]+\$        "for=\$proxy_protocol_addr";
+        ~^[0-9A-Fa-f:.]+\$ "for="[\$proxy_protocol_addr]"";
+        default           "for=unknown";
+    }
+
+    map \$http_forwarded \$proxy_add_forwarded {
+        "~^(,[ \t]*)*([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?(;([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?)*([ \t]*,([ \t]*([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?(;([!#\$%&'*+.^_\`|~0-9A-Za-z-]+=([!#\$%&'*+.^_\`|~0-9A-Za-z-]+|"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\[\t \x21-\x7E\x80-\xFF])*"))?)*)?)*\$" "\$http_forwarded, \$proxy_forwarded_elem";
+        default "\$proxy_forwarded_elem";
+    }
+
+    server {
+        listen 80;
+        listen [::]:80;
+        return 301 https://\$host\$request_uri;
+    }
+
+    server {
+        listen                     127.0.0.1:8001 ssl;
+
+        set_real_ip_from           127.0.0.1;
+        real_ip_header             proxy_protocol;
+
+        server_name                ${domain};
+
+        ssl_certificate            ${cert_path};
+        ssl_certificate_key        ${key_path};
+
+        ssl_protocols              TLSv1.2 TLSv1.3;
+        ssl_ciphers                TLS13_AES_128_GCM_SHA256:TLS13_AES_256_GCM_SHA384:TLS13_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
+        ssl_prefer_server_ciphers  on;
+
+        ssl_stapling               on;
+        ssl_stapling_verify        on;
+        resolver                   1.1.1.1 valid=60s;
+        resolver_timeout           2s;
+
+        root  /var/www/html;
+        index index.html;
+
+        location / {
+            try_files \$uri \$uri/ =404;
+        }
+
+        location ~* \.(php|asp|aspx|jsp|cgi)\$ {
+            return 404;
+        }
+    }
+}
+NGINXEOF
+
+    # 验证并重载 Nginx
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+        log_success "Nginx REALITY 回落配置已写入并重载"
+        log_info "  证书: ${cert_path}"
+        log_info "  私钥: ${key_path}"
+        log_info "  域名: ${domain}"
+        log_info "  回落端口: 127.0.0.1:8001"
+    else
+        log_warn "Nginx 配置语法有误，请手动检查 /etc/nginx/nginx.conf"
+        nginx -t
+    fi
 }
 
 # 5. VMess TCP
@@ -1162,7 +1319,7 @@ build_vmess_tcp() {
     local tag port uuid
 
     ask_val   tag  "tag（inbound 标识）"    "vmess-tcp-in"
-    ask_val   port "listen_port（监听端口）" "9443"
+    ask_val   port "listen_port（监听端口）" "45790"
     ask_random uuid "uuid（用户 UUID）"     "$(gen_uuid)"
 
     select_server_name "example.com"
@@ -1198,7 +1355,7 @@ build_vmess_ws() {
     local tag port uuid wspath
 
     ask_val   tag    "tag（inbound 标识）"       "vmess-ws-in"
-    ask_val   port   "listen_port（监听端口）"    "9444"
+    ask_val   port   "listen_port（监听端口）"    "45791"
     ask_random uuid  "uuid（用户 UUID）"          "$(gen_uuid)"
     ask_val   wspath "ws path（WebSocket 路径）"  "/vmess-ws"
 
@@ -1240,7 +1397,7 @@ build_trojan_tcp() {
     local tag port pwd uname
 
     ask_val   tag   "tag（inbound 标识）"    "trojan-tcp-in"
-    ask_val   port  "listen_port（监听端口）" "10443"
+    ask_val   port  "listen_port（监听端口）" "44790"
     ask_random pwd  "password（Trojan 密码）" "$(gen_password 20)"
     ask_val   uname "name（用户名）"          "user-trojan-tcp"
 
@@ -1278,7 +1435,7 @@ build_trojan_ws() {
     local tag port pwd wspath
 
     ask_val   tag    "tag（inbound 标识）"       "trojan-ws-in"
-    ask_val   port   "listen_port（监听端口）"    "10444"
+    ask_val   port   "listen_port（监听端口）"    "44791"
     ask_random pwd   "password（Trojan 密码）"    "$(gen_password 20)"
     ask_val   wspath "ws path（WebSocket 路径）"  "/trojan-ws"
 
@@ -1320,7 +1477,7 @@ build_ss_classic() {
     local tag port mc method pwd
 
     ask_val tag  "tag（inbound 标识）"    "ss-aes-in"
-    ask_val port "listen_port（监听端口）" "11001"
+    ask_val port "listen_port（监听端口）" "46792"
 
     echo -e "  ${CYAN}◆ 加密方式${NC}"
     echo -e "    ${YELLOW}1)${NC} aes-256-gcm          [默认，推荐]"
@@ -1360,7 +1517,7 @@ build_ss2022_256() {
     local tag port spwd upwd uname
 
     ask_val   tag   "tag（inbound 标识）"    "ss-2022-256-in"
-    ask_val   port  "listen_port（监听端口）" "11002"
+    ask_val   port  "listen_port（监听端口）" "46791"
     ask_random spwd "server password（服务端密钥，base64-32B）" "$(gen_ss2022_key_256)"
     ask_random upwd "user password（用户密钥，base64-32B）"     "$(gen_ss2022_key_256)"
     ask_val   uname "name（用户名）" "user-ss-2022-256"
@@ -1389,7 +1546,7 @@ build_ss2022_128() {
     local tag port spwd upwd
 
     ask_val   tag  "tag（inbound 标识）"    "ss-2022-128-in"
-    ask_val   port "listen_port（监听端口）" "11003"
+    ask_val   port "listen_port（监听端口）" "46790"
     ask_random spwd "server password（服务端密钥，base64-16B）" "$(gen_ss2022_key_128)"
     ask_random upwd "user password（用户密钥，base64-16B）"     "$(gen_ss2022_key_128)"
 
@@ -1417,7 +1574,7 @@ build_hysteria2() {
     local tag port pwd obfspwd up dn
 
     ask_val   tag      "tag（inbound 标识）"    "hysteria2-in"
-    ask_val   port     "listen_port（监听端口）" "12443"
+    ask_val   port     "listen_port（监听端口）" "43790"
     ask_random pwd     "password（连接密码）"    "$(gen_uuid)"
     ask_random obfspwd "obfs password（混淆密码）" "$(gen_password 16)"
     ask_val   up       "up_mbps（上行限速 Mbps）"  "200"
@@ -1460,7 +1617,7 @@ build_tuic() {
     local tag port uuid pwd
 
     ask_val   tag  "tag（inbound 标识）"    "tuic-in"
-    ask_val   port "listen_port（监听端口）" "13443"
+    ask_val   port "listen_port（监听端口）" "42790"
     ask_random uuid "uuid（用户 UUID）"     "$(gen_uuid)"
     ask_random pwd  "password（用户密码）"  "$(gen_password 20)"
 
@@ -1501,7 +1658,7 @@ build_anytls() {
     local tag port pwd
 
     ask_val   tag  "tag（inbound 标识）"    "anytls-in"
-    ask_val   port "listen_port（监听端口）" "14443"
+    ask_val   port "listen_port（监听端口）" "48790"
     ask_random pwd "password（连接密码）"   "$(gen_uuid)"
 
     select_server_name "example.com"
@@ -1537,7 +1694,7 @@ build_naive() {
     local tag port uname pwd
 
     ask_val   tag   "tag（inbound 标识）"    "naive-in"
-    ask_val   port  "listen_port（监听端口）" "15443"
+    ask_val   port  "listen_port（监听端口）" "41790"
     ask_random uname "username（用户名）"    "$(gen_naive_username)"
     ask_random pwd   "password（用户密码）"  "$(gen_password 20)"
 
@@ -1687,14 +1844,14 @@ EOF
 
 # ────────────────────────────────────────────────────────────────
 #  ══════════════════════════════════════════════════════════════
-#  五、sing-box 服务管理
+#  五、服务管理（sing-box / Nginx）
 #  ══════════════════════════════════════════════════════════════
 # ────────────────────────────────────────────────────────────────
 
 menu_service() {
     while true; do
         clear
-        echo -e "${BOLD}${CYAN}══ 五、sing-box 服务管理 ══${NC}"
+        echo -e "${BOLD}${CYAN}══ 五、服务管理 ══${NC}"
         echo ""
         local status_str
         if systemctl is-active --quiet sing-box 2>/dev/null; then
@@ -1704,6 +1861,7 @@ menu_service() {
         fi
         echo -e "  当前状态: $status_str"
         echo ""
+        echo -e "  ${CYAN}── sing-box ──${NC}"
         echo "  1) 启动 sing-box"
         echo "  2) 停止 sing-box"
         echo "  3) 重启 sing-box 并查看状态"
@@ -1713,7 +1871,15 @@ menu_service() {
         echo "  7) 查看是否开机自启"
         echo "  8) 实时查看日志"
         echo "  9) 验证配置文件"
-        echo " 10) 一键修复 DNS 格式（解决 legacy DNS 警告）"
+        echo " 10) 一键修复配置（移除旧 dns/route 段）"
+        echo ""
+        echo -e "  ${CYAN}── Nginx ──${NC}"
+        echo " 11) 验证 Nginx 配置 (nginx -t)"
+        echo " 12) 重启 Nginx 并查看状态"
+        echo " 13) 启动 Nginx"
+        echo " 14) 停止 Nginx"
+        echo " 15) 设为开机自启"
+        echo " 16) 实时查看 Nginx 错误日志"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -1759,6 +1925,26 @@ menu_service() {
                 fi
                 press_enter ;;
             10) fix_dns_format; press_enter ;;
+            11)
+                if command -v nginx &>/dev/null; then
+                    nginx -t && log_success "Nginx 配置验证通过" || log_error "Nginx 配置有误"
+                else
+                    log_error "Nginx 未安装"
+                fi
+                press_enter ;;
+            12)
+                if command -v nginx &>/dev/null; then
+                    systemctl restart nginx
+                    echo ""
+                    systemctl status nginx --no-pager
+                else
+                    log_error "Nginx 未安装"
+                fi
+                press_enter ;;
+            13) systemctl start  nginx && log_success "Nginx 已启动"; press_enter ;;
+            14) systemctl stop   nginx && log_success "Nginx 已停止"; press_enter ;;
+            15) systemctl enable nginx && log_success "Nginx 已设为开机自启"; press_enter ;;
+            16) tail -f /var/log/nginx/error.log ;;
             0) return ;;
             *) log_warn "无效选择" ;;
         esac
@@ -2069,7 +2255,15 @@ for ib in inbounds:
         pwd    = users[0].get('password', '')
         up_m   = ib.get('up_mbps', 200)
         dn_m   = ib.get('down_mbps', 100)
+        # 读取混淆配置
+        obfs_conf = ib.get('obfs', {})
+        obfs_type = obfs_conf.get('type', '')
+        obfs_pwd  = obfs_conf.get('password', '')
         params = f"sni={sni}&insecure=0&allowInsecure=0&upmbps={up_m}&downmbps={dn_m}"
+        if obfs_type:
+            params += f"&obfs={obfs_type}"
+        if obfs_pwd:
+            params += f"&obfs-password={urlencode(obfs_pwd)}"
         links.append(f"hysteria2://{pwd}@{addr}:{port}?{params}#{tag_enc}")
 
         cp = {
@@ -2077,6 +2271,10 @@ for ib in inbounds:
             'password': pwd, 'sni': sni, 'up': f"{up_m} Mbps", 'down': f"{dn_m} Mbps",
             'skip-cert-verify': False
         }
+        if obfs_type:
+            cp['obfs'] = obfs_type
+        if obfs_pwd:
+            cp['obfs-password'] = obfs_pwd
         clash_proxies.append(cp)
         clash_proxy_names.append(tag)
 
@@ -2257,7 +2455,7 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  (jddj v2.0)            ║"
+        echo "║          服务器一键管理脚本  (jddj v2.1)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
