@@ -5,9 +5,9 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 【终极修复】采用 vpsbox 工业级四重注册机制，彻底解决 jddj command not found：
-#      (转移至 /usr/bin + 软链接防失联 + bashrc 强制别名注入 + 即时 source 刷新)。
-#   2. 【防 404 机制】完全剥离 GitHub 远程拉取依赖，只针对本地执行文件进行物理复制。
+#   1. 【终极修复】采用用户提供的先进思路：创建专属文件夹 (/etc/jddj) 存储主代码，
+#      并在 /usr/bin/jddj 生成纯净 Launcher 调用，彻底避开 subshell 环境隔离。
+#   2. 【换行符免疫】加入 sed 去除 \r 机制，杜绝 Windows 编辑器造成的 command not found。
 #   3. 【菜单优化】sing-box 安装方式中，将原方案稳居第 1 位，默认选项设为 0 (返回)。
 #   4. 【UI 与保护】双线精美 UI 边框，加入 Ctrl+C 强退保护与优雅提示。
 # ================================================================
@@ -60,43 +60,57 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (vpsbox 级工业四重保险)
+#  安装 jddj 快捷命令 (采用专属文件夹 + 启动器调用的终极思路)
 # ────────────────────────────────────────────────────────────────
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
+
 install_shortcut() {
-    local target_bin="/usr/bin/jddj"
-    
-    # 防止在目标路径下无限循环复制
-    if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$target_bin" ]]; then
+    local install_dir="/etc/jddj"
+    local script_path="${install_dir}/jddj.sh"
+    local wrapper_path="/usr/bin/jddj"
+
+    # 如果当前就在执行已安装好的路径，直接跳过防死循环
+    if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$(realpath "$script_path" 2>/dev/null)" ]]; then
         return
     fi
 
-    set +e # 临时关闭严格模式，防止环境导致中断
+    set +e # 临时关闭严格模式
+    
+    # 1. 创建专属文件夹
+    mkdir -p "$install_dir"
 
-    # 1. 物理层复制：只信任本地文件，断绝网络 404
-    if [[ -f "$0" && -s "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        mkdir -p /usr/bin
-        cp -f "$0" "$target_bin" 2>/dev/null || true
-        chmod 755 "$target_bin" 2>/dev/null || true
+    # 2. 保存主脚本到专用文件夹
+    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
+        cp -f "$0" "$script_path" 2>/dev/null || true
+    else
+        # 管道运行，通过 URL 拉取
+        if command -v curl >/dev/null 2>&1; then
+            curl -sL "$JDDJ_REMOTE_URL" -o "$script_path" 2>/dev/null || true
+        else
+            wget -qO "$script_path" "$JDDJ_REMOTE_URL" 2>/dev/null || true
+        fi
     fi
 
-    # 2. 软链接双重保险
-    if [[ -f "$0" && "$0" != "$target_bin" ]]; then
-         ln -sf "$(realpath "$0")" "$target_bin" 2>/dev/null || true
+    # 3. 抹杀 Windows 隐藏换行符（核心防 command not found）
+    if [[ -f "$script_path" ]]; then
+        sed -i 's/\r//g' "$script_path" 2>/dev/null || true
+        chmod 755 "$script_path" 2>/dev/null || true
     fi
 
-    # 3. Alias 环境变量强制注入 (vpsbox 核心绝招)
-    if [[ -f ~/.bashrc ]]; then
-        # 先清理可能存在的旧的错误 alias
-        sed -i '/alias jddj=/d' ~/.bashrc 2>/dev/null || true
-        # 写入新的别名，直接指向执行本脚本的绝对路径
-        local real_path
-        real_path=$(realpath "$0" 2>/dev/null || echo "$target_bin")
-        echo "alias jddj='bash $real_path'" >> ~/.bashrc
-    fi
-
-    # 4. 立即刷新缓存
+    # 4. 生成系统全局调用器 (Launcher)
+    cat > "$wrapper_path" << 'EOF'
+#!/bin/bash
+if [[ -f /etc/jddj/jddj.sh ]]; then
+    exec bash /etc/jddj/jddj.sh "$@"
+else
+    echo -e "\033[0;31m[错误] 找不到核心文件 /etc/jddj/jddj.sh，请重新下载安装脚本！\033[0m"
+fi
+EOF
+    
+    chmod 755 "$wrapper_path" 2>/dev/null || true
+    
+    # 刷新哈希缓存
     hash -r 2>/dev/null || true
-    source ~/.bashrc 2>/dev/null || true
 
     set -e
 }
