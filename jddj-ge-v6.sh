@@ -5,13 +5,13 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 彻底修复退出后输入快捷命令 jddj 提示 Permission denied (权限不足) 的问题。
-#      (优先本地直接拷贝并强制提权，杜绝网络问题导致的脚本损坏)。
-#   2. 重构 sing-box 安装逻辑，引入多重 fallback 链保底安装：
-#      [1] 官方 APT/DNF 仓库源安装 (优先级最高，最规范稳定)
-#      [2] 官方一键脚本安装 (支持最新 install.sh 与旧版 deb/rpm.sh)
-#      [3] GitHub API 拉取最新 Release 二进制压缩包直装 (终极兜底)
-#   3. 继承 v5 的全自动默认配置、端口 443 优化与优雅退出提示功能。
+#   1. 彻底修复退出后输入快捷命令 jddj 提示 Permission denied 的问题：
+#      (完全剥离网络下载依赖，改为直接物理拷贝当前正在运行的脚本，并强制赋予 755 最高执行权限)。
+#   2. 整合 sing-box 安装为严格的 3 重保底链：
+#      ① 官方仓库安装 (APT/DNF) -> 优先级最高，最稳定。
+#      ② 官方 bash 脚本安装 -> (兼容最新 install.sh 与旧版 deb/rpm 脚本)。
+#      ③ GitHub Releases 直接下载二进制 -> 终极兜底。
+#   3. 继承全自动默认配置、端口 443 优化与主菜单返回 0 等所有优化。
 # ================================================================
 
 # 遇到错误立即退出
@@ -59,40 +59,21 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (已深度优化，杜绝 Permission denied)
+#  安装 jddj 快捷命令 (优化 1：彻底解决 Permission Denied)
 # ────────────────────────────────────────────────────────────────
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
-
 install_self() {
     local TARGET="/usr/local/bin/jddj"
     
-    # 1. 防止无限覆盖运行中的自身
+    # 1. 避免无限覆盖运行中的自身
     if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$TARGET" ]]; then
         chmod 755 "$TARGET" 2>/dev/null || true
         return
     fi
 
-    # 2. 准备目录并删除可能引起权限冲突的旧文件
-    mkdir -p /usr/local/bin
-    rm -rf "$TARGET"
-
-    # 3. 复制本地代码或远程拉取
-    if [[ -f "$0" ]] && grep -q "jddj" "$0" 2>/dev/null; then
-        # 如果是作为普通文件运行 (如 bash xxx.sh)，直接将自身内容写入系统路径
-        cat "$0" > "$TARGET" 2>/dev/null || true
-    else
-        # 如果是管道化执行 (如 curl | bash)，则从远程拉取
-        if command -v curl &>/dev/null; then
-            curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null || true
-        else
-            wget -qO "$TARGET" "$JDDJ_REMOTE_URL" 2>/dev/null || true
-        fi
-    fi
-
-    # 4. 强制最高执行赋权
-    if [[ -f "$TARGET" ]]; then
-        chmod +x "$TARGET" 2>/dev/null || true
-        chmod 755 "$TARGET" 2>/dev/null || true
+    # 2. 彻底抛弃网络拉取，只复制当前最新执行的文件，并赋予最高执行权限
+    if [[ -f "$0" && -s "$0" ]]; then
+        cp -f "$0" "$TARGET"
+        chmod 755 "$TARGET"
     fi
 }
 
@@ -291,7 +272,7 @@ select_server_name() {
             echo -e "    ${YELLOW}$((i+1)))${NC} ${domains[$i]}"
         done
         local manual_idx=$(( ${#domains[@]} + 1 ))
-        echo -e "    ${YELLOW}${manual_idx})${NC} 手录输入"
+        echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入"
         echo ""
         local sn_choice
         read -rp "  > (编号，默认 1): " sn_choice
@@ -608,7 +589,7 @@ menu_basic() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  二、SSL 证书 (完美融合的独立高级验证模块)
+#  二、SSL 证书 
 # ────────────────────────────────────────────────────────────────
 STOPPED_SERVICES_SSL=()
 
@@ -929,7 +910,7 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx）(优化2：引入4重 fallback)
+#  三、安装服务（sing-box / Nginx）(优化 2：多重 Fallback 链)
 # ────────────────────────────────────────────────────────────────
 setup_singbox_service() {
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
@@ -968,7 +949,7 @@ EOF
 }
 
 install_singbox_latest() {
-    log_step "尝试 1/4：官方 APT/DNF 仓库源安装 (优先级最高，最稳定)..."
+    log_step "尝试 1/3：官方 APT/DNF 仓库源安装 (优先级最高，最稳定)..."
     local repo_success=false
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt-get update -y >/dev/null 2>&1 || true
@@ -995,19 +976,16 @@ install_singbox_latest() {
         return 0
     fi
 
-    log_warn "方式 1 失败，尝试 2/4：官方一键安装脚本 (install.sh)..."
+    log_warn "方式 1 失败，尝试 2/3：官方 bash 一键安装脚本..."
     if curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1; then
         log_success "最新 install.sh 脚本安装成功"
         return 0
-    fi
-
-    log_warn "方式 2 失败，尝试 3/4：官方旧版安装脚本 (deb/rpm)..."
-    if bash <(curl -fsSL https://sing-box.app/deb-install.sh) >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) >/dev/null 2>&1; then
+    elif bash <(curl -fsSL https://sing-box.app/deb-install.sh) >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) >/dev/null 2>&1; then
         log_success "旧版 deb/rpm 脚本安装成功"
         return 0
     fi
 
-    log_warn "方式 3 失败，尝试 4/4：GitHub API 兜底拉取最新 Release 二进制..."
+    log_warn "方式 2 失败，尝试 3/3：GitHub API 兜底拉取最新 Release 二进制..."
     local ARCH
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -1031,46 +1009,6 @@ install_singbox_latest() {
     fi
 
     log_error "所有安装方式均失败，请检查服务器网络！"
-    return 1
-}
-
-install_singbox_beta() {
-    log_step "尝试 1/3：官方最新 install.sh 安装 Beta..."
-    if curl -fsSL https://sing-box.app/install.sh | bash -s -- --beta >/dev/null 2>&1; then
-        log_success "Beta 版脚本安装成功"
-        return 0
-    fi
-
-    log_warn "方式 1 失败，尝试 2/3：旧版 deb/rpm 脚本安装 Beta..."
-    if bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) beta >/dev/null 2>&1; then
-        log_success "Beta 旧版脚本安装成功"
-        return 0
-    fi
-
-    log_warn "方式 2 失败，尝试 3/3：GitHub API 下载最新 Beta 二进制..."
-    local ARCH
-    ARCH=$(uname -m)
-    case "$ARCH" in
-        x86_64) ARCH_STR="amd64" ;;
-        aarch64) ARCH_STR="arm64" ;;
-        armv7l) ARCH_STR="armv7" ;;
-        *) ARCH_STR="amd64" ;;
-    esac
-    local BETA_VER
-    BETA_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"v([^"]+)".*/\1/')
-    if [[ -n "$BETA_VER" ]]; then
-        log_info "获取到 GitHub 最新 Beta 版本: v$BETA_VER"
-        local URL="https://github.com/SagerNet/sing-box/releases/download/v${BETA_VER}/sing-box-${BETA_VER}-linux-${ARCH_STR}.tar.gz"
-        if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz 2>/dev/null || wget -qO /tmp/sing-box.tar.gz "$URL" 2>/dev/null; then
-            tar -xzf /tmp/sing-box.tar.gz -C /tmp/
-            install -m 755 "/tmp/sing-box-${BETA_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
-            rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${BETA_VER}-linux-${ARCH_STR}"
-            log_success "Beta 二进制文件直装成功"
-            return 0
-        fi
-    fi
-
-    log_error "Beta 安装失败，请检查服务器网络"
     return 1
 }
 
@@ -1121,7 +1059,14 @@ menu_install_service() {
                         log_error "下载失败"; press_enter; continue;
                     fi
                 elif [[ "$vc" == "3" ]]; then
-                    install_singbox_beta || { press_enter; continue; }
+                    log_step "尝试安装官方最新 Beta 版..."
+                    if curl -fsSL https://sing-box.app/install.sh | bash -s -- --beta >/dev/null 2>&1; then
+                        log_success "Beta 版脚本安装成功"
+                    elif bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta >/dev/null 2>&1; then
+                        log_success "Beta 旧版脚本安装成功"
+                    else
+                        log_error "Beta 安装失败，请检查服务器网络"; press_enter; continue
+                    fi
                 fi
                 setup_singbox_service
                 press_enter
