@@ -4,16 +4,12 @@
 #   版本号：jddj-ge-v7
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (jddj-ge-v7 增强版)】
-#   3. 新增功能：节点配置复原。在全自动静默配置或手动配置时，支持输入旧的 VLESS 节点链接。
-#      脚本会自动反向解析出 UUID、端口 (Port) 和 WebSocket 路径 (Path)，强制锁定这些参数，
-#      保证重装后生成的节点链接与原链接完全一致，客户端无需重新导入即可直连。
-# 【历史优化内容 (jddj-ge-v7)】
-#   1. 重构快捷命令注册机制：将快捷路径从 /usr/local/bin 移至绝对全局的 /usr/bin/jddj，彻底解决环境变量不生效导致的 command not found。
-#   2. 增强逻辑鲁棒性：加入 hash -r 强制刷新命令缓存；移除掩耳盗铃的静默失败，URL 不对或下载失败时会明确黄字警告。
-# 【历史优化内容 (jddj-ge-v6)】
-#   1. 引入高级快捷命令注册机制：通过检测当前运行环境，动态复制本地文件或下载远程源码。
-#   2. 增加防死循环和版本一致性检测，避免重复下载和写入，确保快捷命令（jddj）高效稳定。
+# 【本次优化内容 (jddj-ge-v7)】
+#   1. 新增【旧节点链接导入】功能：在配置 sing-box 阶段，支持粘贴单个、多个
+#      协议链接或完整 Base64 订阅内容。
+#   2. 自动复用核心参数：脚本将智能提取链接中的端口、UUID、密码、路径、
+#      Reality ShortID 等参数。在自动/静默配置模式下，新生成的节点链接
+#      将与原来保持完全一致（未导入的协议仍保持随机或手动设置）。
 # ================================================================
 
 # 遇到错误立即退出（你在关键部署中触发）
@@ -42,12 +38,6 @@ OS=""
 INSTALL_CMD=""
 UPDATE_CMD=""
 AUTO_DEFAULT=false # 用于控制是否开启静默默认模式
-
-# 配置复原全局变量
-RESTORE_UUID=""
-RESTORE_WS_PORT=""
-RESTORE_WS_PATH=""
-RESTORE_TCP_PORT=""
 
 log_info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -124,38 +114,6 @@ gen_naive_username() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  节点配置复原解析函数
-# ────────────────────────────────────────────────────────────────
-parse_restore_link() {
-    local link="$1"
-    # 去除首尾空格
-    link=$(echo "$link" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-
-    if [[ "$link" =~ ^vless://([^@]+)@([^:]+):([0-9]+) ]]; then
-        RESTORE_UUID="${BASH_REMATCH[1]}"
-        local extracted_port="${BASH_REMATCH[3]}"
-        
-        local net_type
-        net_type=$(echo "$link" | grep -oP 'type=\K[^&#]+' || true)
-        
-        if [[ "$net_type" == "ws" ]]; then
-            RESTORE_WS_PORT="$extracted_port"
-            local path_encoded
-            path_encoded=$(echo "$link" | grep -oP 'path=\K[^&#]+' || true)
-            if [[ -n "$path_encoded" ]]; then
-                # URL 解码，将 %2F 等转换为 /
-                RESTORE_WS_PATH=$(echo "$path_encoded" | sed 's/%2[Ff]/\//g')
-            fi
-        else
-            RESTORE_TCP_PORT="$extracted_port"
-        fi
-        log_success "成功解析旧链接，已锁定 UUID: ${RESTORE_UUID:0:8}..."
-    else
-        log_warn "暂不支持该格式链接解析，将继续使用随机生成参数。"
-    fi
-}
-
-# ────────────────────────────────────────────────────────────────
 #  通用输入函数 (含自动默认支持)
 # ────────────────────────────────────────────────────────────────
 ask_val() {
@@ -193,8 +151,8 @@ ask_random() {
     fi
 
     echo -e "  ${CYAN}◆ ${label}${NC}"
-    echo -e "    随机生成值: ${YELLOW}${randval}${NC}"
-    echo -e "    (回车使用随机值，或输入自定义值覆盖)"
+    echo -e "    生成或提取的值: ${YELLOW}${randval}${NC}"
+    echo -e "    (回车使用该值，或输入自定义值覆盖)"
     read -rp "  > " input
     result="${input:-$randval}"
     echo -e "  ${GREEN}✓ ${label} = ${result}${NC}"
@@ -350,13 +308,13 @@ ask_cert_paths() {
 bootstrap_packages() {
     log_step "预装基础组件"
     if command -v apt &>/dev/null; then
-        apt update -y && apt install -y curl sudo wget git unzip nano vim openssl
+        apt update -y && apt install -y curl sudo wget git unzip nano vim openssl python3
     elif command -v dnf &>/dev/null; then
         dnf install -y epel-release 2>/dev/null || true
-        dnf install -y curl sudo wget git unzip nano vim openssl
+        dnf install -y curl sudo wget git unzip nano vim openssl python3
     elif command -v yum &>/dev/null; then
         yum install -y epel-release 2>/dev/null || true
-        yum install -y curl sudo wget git unzip nano vim openssl
+        yum install -y curl sudo wget git unzip nano vim openssl python3
     fi
     log_success "基础组件已就绪"
 }
@@ -611,7 +569,7 @@ menu_basic() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  二、SSL 证书
+#  二、SSL 证书 (完美融合的独立高级验证模块)
 # ────────────────────────────────────────────────────────────────
 STOPPED_SERVICES_SSL=()
 
@@ -1066,16 +1024,9 @@ build_vless_tcp() {
 
     local tag port uuid uname flow_choice flow
 
-    local def_port="47790"
-    [[ -n "$RESTORE_TCP_PORT" ]] && def_port="$RESTORE_TCP_PORT"
     ask_val   tag   "tag（inbound 标识）"  "vless-tcp-in"
-    ask_val   port  "listen_port（监听端口）" "$def_port"
-
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid "uuid（用户 UUID）" "$def_uuid"
-
+    ask_val   port  "listen_port（监听端口）" "${OLD_VLESS_TCP_PORT:-47790}"
+    ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_TCP_UUID:-$(gen_uuid)}"
     ask_val   uname "name（用户名）" "user-vless-tcp"
 
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
@@ -1133,19 +1084,9 @@ build_vless_ws() {
     local tag port uuid wspath
 
     ask_val   tag    "tag（inbound 标识）"    "vless-ws-in"
-
-    local def_port="47791"
-    [[ -n "$RESTORE_WS_PORT" ]] && def_port="$RESTORE_WS_PORT"
-    ask_val   port   "listen_port（监听端口）" "$def_port"
-
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid  "uuid（用户 UUID）"       "$def_uuid"
-
-    local def_path="/vless-ws"
-    [[ -n "$RESTORE_WS_PATH" ]] && def_path="$RESTORE_WS_PATH"
-    ask_val   wspath "ws path（WebSocket 路径）"  "$def_path"
+    ask_val   port   "listen_port（监听端口）" "${OLD_VLESS_WS_PORT:-47791}"
+    ask_random uuid  "uuid（用户 UUID）"       "${OLD_VLESS_WS_UUID:-$(gen_uuid)}"
+    ask_val   wspath "ws path（WebSocket 路径）" "${OLD_VLESS_WS_PATH:-/vless-ws}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
@@ -1186,14 +1127,9 @@ build_vless_grpc() {
     local tag port uuid svcname
 
     ask_val   tag     "tag（inbound 标识）"     "vless-grpc-in"
-    ask_val   port    "listen_port（监听端口）"  "47792"
-
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid   "uuid（用户 UUID）"        "$def_uuid"
-    
-    ask_val   svcname "service_name（gRPC 服务名）" "vless-grpc-service"
+    ask_val   port    "listen_port（监听端口）"  "${OLD_VLESS_GRPC_PORT:-47792}"
+    ask_random uuid   "uuid（用户 UUID）"        "${OLD_VLESS_GRPC_UUID:-$(gen_uuid)}"
+    ask_val   svcname "service_name（gRPC 服务名）" "${OLD_VLESS_GRPC_SVC:-vless-grpc-service}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
@@ -1232,14 +1168,16 @@ build_vless_reality() {
 
     local port uuid pk si sn hs_server hs_port
 
-    ask_val port "listen_port（监听端口，建议 443）" "443"
-    
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid "uuid（用户 UUID）" "$def_uuid"
+    ask_val port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
+    ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
 
     echo -e "  ${YELLOW}正在生成 REALITY 密钥对...${NC}"
+    if [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
+        log_warn "检测到旧的 Reality 节点数据！"
+        log_warn "由于服务端私钥无法从分享链接中提取，系统已为您保留了原本的 Port, UUID 和 ShortID，但必须重新生成一对新的公私钥。"
+        log_warn "【重点】配置完成后，请务必在客户端的 Reality 节点中更新为新的 Public Key，否则将无法连接！"
+    fi
+
     local keypair_out privkey pubkey
     keypair_out=$(gen_reality_keypair)
     privkey=$(echo "$keypair_out" | grep -i private | awk '{print $NF}')
@@ -1259,8 +1197,8 @@ build_vless_reality() {
         echo -e "    (若需自定义，请同时替换 Private Key 和对应的 Public Key)"
         echo ""
         echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
-        echo -e "    随机生成值: ${YELLOW}${privkey}${NC}"
-        echo -e "    (回车使用随机值，或输入自定义 private_key)"
+        echo -e "    生成值: ${YELLOW}${privkey}${NC}"
+        echo -e "    (回车使用该值，或输入自定义 private_key)"
         read -rp "  > " _pk_input
         pk="${_pk_input:-$privkey}"
         if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
@@ -1272,7 +1210,7 @@ build_vless_reality() {
     fi
     echo ""
 
-    ask_random si "short_id（REALITY Short ID）" "$sid_rand"
+    ask_random si "short_id（REALITY Short ID）" "${OLD_VLESS_REALITY_SID:-$sid_rand}"
 
     echo ""
     echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
@@ -1483,12 +1421,8 @@ build_vmess_tcp() {
     local tag port uuid
 
     ask_val   tag  "tag（inbound 标识）"    "vmess-tcp-in"
-    ask_val   port "listen_port（监听端口）" "45790"
-
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid "uuid（用户 UUID）"     "$def_uuid"
+    ask_val   port "listen_port（监听端口）" "${OLD_VMESS_TCP_PORT:-45790}"
+    ask_random uuid "uuid（用户 UUID）"     "${OLD_VMESS_TCP_UUID:-$(gen_uuid)}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
@@ -1522,14 +1456,9 @@ build_vmess_ws() {
     local tag port uuid wspath
 
     ask_val   tag    "tag（inbound 标识）"       "vmess-ws-in"
-    ask_val   port   "listen_port（监听端口）"    "45791"
-
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid  "uuid（用户 UUID）"          "$def_uuid"
-    
-    ask_val   wspath "ws path（WebSocket 路径）"  "/vmess-ws"
+    ask_val   port   "listen_port（监听端口）"    "${OLD_VMESS_WS_PORT:-45791}"
+    ask_random uuid  "uuid（用户 UUID）"          "${OLD_VMESS_WS_UUID:-$(gen_uuid)}"
+    ask_val   wspath "ws path（WebSocket 路径）"  "${OLD_VMESS_WS_PATH:-/vmess-ws}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
@@ -1568,8 +1497,8 @@ build_trojan_tcp() {
     local tag port pwd uname
 
     ask_val   tag   "tag（inbound 标识）"    "trojan-tcp-in"
-    ask_val   port  "listen_port（监听端口）" "44790"
-    ask_random pwd  "password（Trojan 密码）" "$(gen_password 20)"
+    ask_val   port  "listen_port（监听端口）" "${OLD_TROJAN_TCP_PORT:-44790}"
+    ask_random pwd  "password（Trojan 密码）" "${OLD_TROJAN_TCP_PWD:-$(gen_password 20)}"
     ask_val   uname "name（用户名）"          "user-trojan-tcp"
 
     select_server_name "example.com"
@@ -1605,9 +1534,9 @@ build_trojan_ws() {
     local tag port pwd wspath
 
     ask_val   tag    "tag（inbound 标识）"       "trojan-ws-in"
-    ask_val   port   "listen_port（监听端口）"    "44791"
-    ask_random pwd   "password（Trojan 密码）"    "$(gen_password 20)"
-    ask_val   wspath "ws path（WebSocket 路径）"  "/trojan-ws"
+    ask_val   port   "listen_port（监听端口）"    "${OLD_TROJAN_WS_PORT:-44791}"
+    ask_random pwd   "password（Trojan 密码）"    "${OLD_TROJAN_WS_PWD:-$(gen_password 20)}"
+    ask_val   wspath "ws path（WebSocket 路径）"  "${OLD_TROJAN_WS_PATH:-/trojan-ws}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
@@ -1646,17 +1575,22 @@ build_ss_classic() {
     local tag port mc method pwd
 
     ask_val tag  "tag（inbound 标识）"    "ss-aes-in"
-    ask_val port "listen_port（监听端口）" "46792"
+    ask_val port "listen_port（监听端口）" "${OLD_SS_PORT:-46792}"
 
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
-        method="aes-256-gcm"
+        method="${OLD_SS_METHOD:-aes-256-gcm}"
         echo -e "  ${GREEN}✓ [自动] 加密方式 = ${method}${NC}"
     else
         echo -e "  ${CYAN}◆ 加密方式${NC}"
         echo -e "    ${YELLOW}1)${NC} aes-256-gcm          [默认，推荐]"
         echo -e "    ${YELLOW}2)${NC} aes-128-gcm"
         echo -e "    ${YELLOW}3)${NC} chacha20-ietf-poly1305"
-        ask_val mc "请输入编号" "1"
+        
+        local _def_mc="1"
+        [[ "${OLD_SS_METHOD}" == "aes-128-gcm" ]] && _def_mc="2"
+        [[ "${OLD_SS_METHOD}" == "chacha20-ietf-poly1305" ]] && _def_mc="3"
+        
+        ask_val mc "请输入编号" "$_def_mc"
         case $mc in
             2) method="aes-128-gcm" ;;
             3) method="chacha20-ietf-poly1305" ;;
@@ -1666,7 +1600,7 @@ build_ss_classic() {
     fi
     echo ""
 
-    ask_random pwd "password（连接密码）" "$(gen_password 20)"
+    ask_random pwd "password（连接密码）" "${OLD_SS_PWD:-$(gen_password 20)}"
 
     cat > "$_jf" << EOF
     {
@@ -1690,9 +1624,9 @@ build_ss2022_256() {
     local tag port spwd upwd uname
 
     ask_val   tag   "tag（inbound 标识）"    "ss-2022-256-in"
-    ask_val   port  "listen_port（监听端口）" "46791"
-    ask_random spwd "server password（服务端密钥，base64-32B）" "$(gen_ss2022_key_256)"
-    ask_random upwd "user password（用户密钥，base64-32B）"     "$(gen_ss2022_key_256)"
+    ask_val   port  "listen_port（监听端口）" "${OLD_SS256_PORT:-46791}"
+    ask_random spwd "server password（服务端密钥，base64-32B）" "${OLD_SS256_SPWD:-$(gen_ss2022_key_256)}"
+    ask_random upwd "user password（用户密钥，base64-32B）"     "${OLD_SS256_UPWD:-$(gen_ss2022_key_256)}"
     ask_val   uname "name（用户名）" "user-ss-2022-256"
 
     cat > "$_jf" << EOF
@@ -1718,9 +1652,9 @@ build_ss2022_128() {
     local tag port spwd upwd
 
     ask_val   tag  "tag（inbound 标识）"    "ss-2022-128-in"
-    ask_val   port "listen_port（监听端口）" "46790"
-    ask_random spwd "server password（服务端密钥，base64-16B）" "$(gen_ss2022_key_128)"
-    ask_random upwd "user password（用户密钥，base64-16B）"     "$(gen_ss2022_key_128)"
+    ask_val   port "listen_port（监听端口）" "${OLD_SS128_PORT:-46790}"
+    ask_random spwd "server password（服务端密钥，base64-16B）" "${OLD_SS128_SPWD:-$(gen_ss2022_key_128)}"
+    ask_random upwd "user password（用户密钥，base64-16B）"     "${OLD_SS128_UPWD:-$(gen_ss2022_key_128)}"
 
     cat > "$_jf" << EOF
     {
@@ -1745,9 +1679,9 @@ build_hysteria2() {
     local tag port pwd obfspwd up dn
 
     ask_val   tag      "tag（inbound 标识）"    "hysteria2-in"
-    ask_val   port     "listen_port（监听端口）" "43790"
-    ask_random pwd     "password（连接密码）"    "$(gen_uuid)"
-    ask_random obfspwd "obfs password（混淆密码）" "$(gen_password 16)"
+    ask_val   port     "listen_port（监听端口）" "${OLD_HY2_PORT:-43790}"
+    ask_random pwd     "password（连接密码）"    "${OLD_HY2_PWD:-$(gen_uuid)}"
+    ask_random obfspwd "obfs password（混淆密码）" "${OLD_HY2_OBFSPWD:-$(gen_password 16)}"
     ask_val   up       "up_mbps（上行限速 Mbps）"  "200"
     ask_val   dn       "down_mbps（下行限速 Mbps）" "100"
 
@@ -1755,6 +1689,9 @@ build_hysteria2() {
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    # 如果解析出了 obfs 类型则使用，否则默认 salamander
+    local _obfs_type="${OLD_HY2_OBFS:-salamander}"
 
     cat > "$_jf" << EOF
     {
@@ -1765,7 +1702,7 @@ build_hysteria2() {
       "users": [{"name": "user-hysteria2", "password": "$pwd"}],
       "up_mbps": $up,
       "down_mbps": $dn,
-      "obfs": {"type": "salamander", "password": "$obfspwd"},
+      "obfs": {"type": "$_obfs_type", "password": "$obfspwd"},
       "masquerade": "https://www.bing.com",
       "tls": {
         "enabled": true,
@@ -1787,19 +1724,16 @@ build_tuic() {
     local tag port uuid pwd
 
     ask_val   tag  "tag（inbound 标识）"    "tuic-in"
-    ask_val   port "listen_port（监听端口）" "42790"
-
-    local def_uuid
-    def_uuid="$(gen_uuid)"
-    [[ -n "$RESTORE_UUID" ]] && def_uuid="$RESTORE_UUID"
-    ask_random uuid "uuid（用户 UUID）"     "$def_uuid"
-    
-    ask_random pwd  "password（用户密码）"  "$(gen_password 20)"
+    ask_val   port "listen_port（监听端口）" "${OLD_TUIC_PORT:-42790}"
+    ask_random uuid "uuid（用户 UUID）"     "${OLD_TUIC_UUID:-$(gen_uuid)}"
+    ask_random pwd  "password（用户密码）"  "${OLD_TUIC_PWD:-$(gen_password 20)}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
+    
+    local _cc="${OLD_TUIC_CC:-bbr}"
 
     cat > "$_jf" << EOF
     {
@@ -1808,7 +1742,7 @@ build_tuic() {
       "listen": "::",
       "listen_port": $port,
       "users": [{"name": "user-tuic", "uuid": "$uuid", "password": "$pwd"}],
-      "congestion_control": "bbr",
+      "congestion_control": "$_cc",
       "auth_timeout": "3s",
       "zero_rtt_handshake": false,
       "heartbeat": "10s",
@@ -1832,8 +1766,8 @@ build_anytls() {
     local tag port pwd
 
     ask_val   tag  "tag（inbound 标识）"    "anytls-in"
-    ask_val   port "listen_port（监听端口）" "48790"
-    ask_random pwd "password（连接密码）"   "$(gen_uuid)"
+    ask_val   port "listen_port（监听端口）" "${OLD_ANYTLS_PORT:-48790}"
+    ask_random pwd "password（连接密码）"   "${OLD_ANYTLS_PWD:-$(gen_uuid)}"
 
     select_server_name "example.com"
     local sn="$SELECTED_SN"
@@ -1895,10 +1829,172 @@ EOF
 }
 
 configure_singbox() {
+    # 如果系统未装 python3，尝试通过包管理器静默补充（解析依赖 Python）
+    if ! command -v python3 &>/dev/null; then
+        log_info "正在预装 python3 以支持节点解析..."
+        if command -v apt &>/dev/null; then apt install -y python3 >/dev/null 2>&1;
+        elif command -v dnf &>/dev/null; then dnf install -y python3 >/dev/null 2>&1;
+        elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
+    fi
+
     while true; do
         clear
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
+
+        # --- 新增: 导入旧节点解析 ---
+        echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
+        echo -e "  1) 是，导入旧节点链接"
+        echo -e "  2) 否，生成全新配置 [默认]"
+        read -rp "请选择 (1-2, 默认 2): " import_choice
+        import_choice=${import_choice:-2}
+
+        if [[ "$import_choice" == "1" ]]; then
+            echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
+            local old_links=""
+            while IFS= read -r line; do
+                [[ "$line" == "EOF" ]] && break
+                old_links+="$line\n"
+            done
+            
+            if [[ -n "$old_links" ]]; then
+                log_info "正在解析旧节点数据..."
+                # 借助 Python 强力解析引擎，生成环境变量供 Bash 继承
+                local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
+                cat > "$py_script" << 'PYEOF'
+import sys, urllib.parse, base64, json
+
+input_text = sys.stdin.read().strip()
+if not input_text: sys.exit(0)
+
+# Check for base64 block
+if "://" not in input_text:
+    try:
+        input_text = base64.b64decode(input_text).decode("utf-8")
+    except:
+        pass
+
+vars_out = {}
+for line in input_text.splitlines():
+    line = line.strip()
+    if not line: continue
+    try:
+        if line.startswith("vmess://"):
+            b64 = line[8:]
+            obj = json.loads(base64.b64decode(b64).decode("utf-8"))
+            port = obj.get("port")
+            uid = obj.get("id")
+            net = obj.get("net")
+            path = obj.get("path", "")
+            if net == "ws" or "ws" in obj.get("ps", ""):
+                if uid: vars_out["OLD_VMESS_WS_UUID"] = uid
+                if port: vars_out["OLD_VMESS_WS_PORT"] = port
+                if path: vars_out["OLD_VMESS_WS_PATH"] = path
+            else:
+                if uid: vars_out["OLD_VMESS_TCP_UUID"] = uid
+                if port: vars_out["OLD_VMESS_TCP_PORT"] = port
+        else:
+            parsed = urllib.parse.urlparse(line)
+            scheme = parsed.scheme
+            userinfo = parsed.username or ""
+            pwd_info = parsed.password or ""
+            if pwd_info: userinfo = f"{userinfo}:{pwd_info}"
+            port = parsed.port
+            qs = urllib.parse.parse_qs(parsed.query)
+            tag = parsed.fragment or ""
+            
+            if scheme == "vless":
+                uuid = userinfo
+                security = qs.get("security", [""])[0]
+                type_ = qs.get("type", [""])[0]
+                if security == "reality" or "reality" in tag:
+                    vars_out["OLD_VLESS_REALITY_UUID"] = uuid
+                    if port: vars_out["OLD_VLESS_REALITY_PORT"] = port
+                    if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = qs["pbk"][0]
+                    if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = qs["sid"][0]
+                elif type_ == "grpc" or "grpc" in tag:
+                    vars_out["OLD_VLESS_GRPC_UUID"] = uuid
+                    if port: vars_out["OLD_VLESS_GRPC_PORT"] = port
+                    if "serviceName" in qs: vars_out["OLD_VLESS_GRPC_SVC"] = qs["serviceName"][0]
+                elif type_ == "ws" or "ws" in tag:
+                    vars_out["OLD_VLESS_WS_UUID"] = uuid
+                    if port: vars_out["OLD_VLESS_WS_PORT"] = port
+                    if "path" in qs: vars_out["OLD_VLESS_WS_PATH"] = qs["path"][0]
+                else:
+                    vars_out["OLD_VLESS_TCP_UUID"] = uuid
+                    if port: vars_out["OLD_VLESS_TCP_PORT"] = port
+            elif scheme == "trojan":
+                pwd = urllib.parse.unquote(userinfo) if userinfo else ""
+                type_ = qs.get("type", [""])[0]
+                if type_ == "ws" or "ws" in tag:
+                    vars_out["OLD_TROJAN_WS_PWD"] = pwd
+                    if port: vars_out["OLD_TROJAN_WS_PORT"] = port
+                    if "path" in qs: vars_out["OLD_TROJAN_WS_PATH"] = qs["path"][0]
+                else:
+                    vars_out["OLD_TROJAN_TCP_PWD"] = pwd
+                    if port: vars_out["OLD_TROJAN_TCP_PORT"] = port
+            elif scheme == "ss":
+                try:
+                    raw = base64.urlsafe_b64decode(userinfo + "===").decode("utf-8")
+                    parts = raw.split(":", 2)
+                    method = parts[0]
+                    if "2022" in method:
+                        spwd = parts[1] if len(parts)>1 else ""
+                        upwd = parts[2] if len(parts)>2 else ""
+                        if "128" in method or "128" in tag:
+                            vars_out["OLD_SS128_METHOD"] = method
+                            vars_out["OLD_SS128_SPWD"] = spwd
+                            vars_out["OLD_SS128_UPWD"] = upwd
+                            if port: vars_out["OLD_SS128_PORT"] = port
+                        else:
+                            vars_out["OLD_SS256_METHOD"] = method
+                            vars_out["OLD_SS256_SPWD"] = spwd
+                            vars_out["OLD_SS256_UPWD"] = upwd
+                            if port: vars_out["OLD_SS256_PORT"] = port
+                    else:
+                        pwd = parts[1] if len(parts)>1 else ""
+                        vars_out["OLD_SS_METHOD"] = method
+                        vars_out["OLD_SS_PWD"] = pwd
+                        if port: vars_out["OLD_SS_PORT"] = port
+                except:
+                    pass
+            elif scheme == "hysteria2":
+                vars_out["OLD_HY2_PWD"] = urllib.parse.unquote(userinfo)
+                if port: vars_out["OLD_HY2_PORT"] = port
+                if "obfs" in qs: vars_out["OLD_HY2_OBFS"] = qs["obfs"][0]
+                if "obfs-password" in qs: vars_out["OLD_HY2_OBFSPWD"] = urllib.parse.unquote(qs["obfs-password"][0])
+            elif scheme == "tuic":
+                if ":" in userinfo:
+                    uid, pwd = userinfo.split(":", 1)
+                    vars_out["OLD_TUIC_UUID"] = urllib.parse.unquote(uid)
+                    vars_out["OLD_TUIC_PWD"] = urllib.parse.unquote(pwd)
+                if port: vars_out["OLD_TUIC_PORT"] = port
+                if "congestion_control" in qs: vars_out["OLD_TUIC_CC"] = qs["congestion_control"][0]
+            elif scheme == "anytls":
+                vars_out["OLD_ANYTLS_PWD"] = urllib.parse.unquote(userinfo)
+                if port: vars_out["OLD_ANYTLS_PORT"] = port
+    except Exception:
+        pass
+
+for k, v in vars_out.items():
+    print(f"export {k}=\"{v}\"")
+PYEOF
+                # 执行解析并导出环境变量供 Bash 读取
+                local parse_exports
+                parse_exports=$(python3 "$py_script" <<< -e "$old_links")
+                eval "$parse_exports"
+                rm -f "$py_script"
+                log_success "解析完成，已成功提取匹配节点的参数。"
+            else
+                log_warn "未识别到输入内容，继续常规生成..."
+            fi
+            sleep 1
+            clear
+            echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
+            echo ""
+        fi
+        # ---------------------------------
+
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
         echo "   1)  VLESS — TCP / XTLS-Vision"
@@ -1953,16 +2049,6 @@ configure_singbox() {
         else
             log_info "已选择 ${#PROTO_CHOICES[@]} 个协议，开始逐一配置..."
         fi
-        
-        # 节点配置复原模块注入
-        echo ""
-        echo -e "${CYAN}是否需要从旧的节点链接恢复配置？（VPS 重装系统复原节点必备）${NC}"
-        echo -e "目前支持解析 VLESS 链接，自动提取并锁定 UUID、端口及 WebSocket 路径。不需要请直接回车。"
-        read -rp "请输入旧链接 > " RESTORE_LINK
-        if [[ -n "$RESTORE_LINK" ]]; then
-            parse_restore_link "$RESTORE_LINK"
-        fi
-        echo ""
 
         local TMP_JSON
         TMP_JSON=$(mktemp /tmp/jddj_inbound_XXXXXX)
