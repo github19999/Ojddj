@@ -4,13 +4,12 @@
 #   版本号：jddj-ge-v6
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (jddj-ge-v6)】
+# 【本次优化内容 (jddj-ge-v7)】
+#   1. 重构快捷命令注册机制：将快捷路径从 /usr/local/bin 移至绝对全局的 /usr/bin/jddj，彻底解决环境变量不生效导致的 command not found。
+#   2. 增强逻辑鲁棒性：加入 hash -r 强制刷新命令缓存；移除掩耳盗铃的静默失败，URL 不对或下载失败时会明确黄字警告。
+# 【历史优化内容 (jddj-ge-v6)】
 #   1. 引入高级快捷命令注册机制：通过检测当前运行环境，动态复制本地文件或下载远程源码。
 #   2. 增加防死循环和版本一致性检测，避免重复下载和写入，确保快捷命令（jddj）高效稳定。
-# 【历史优化内容 (jddj-ge-v5)】
-#   1. 优化 VLESS — REALITY 协议 (选项 4) 的默认监听端口 (listen_port) 设为 443。
-#   2. 优化 sing-box 配置菜单：新增选项 16(全部配置) 与 17(全部自动配置，按默认设置配置)；新增选项 0(返回主菜单，并设为默认值)。
-#   3. 优化退出逻辑：退出脚本后，明确提示用户输入 `jddj` 重新进入主菜单。
 # ================================================================
 
 # 遇到错误立即退出（你在关键部署中触发）
@@ -30,7 +29,7 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # 全局变量
-SCRIPT_VERSION="jddj-ge-v6"
+SCRIPT_VERSION="jddj-ge-v7"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -2592,34 +2591,47 @@ main_menu() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (动态同步与检测)
+#  安装 jddj 快捷命令 (V7：重构强制触发机制)
 # ────────────────────────────────────────────────────────────────
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
+# 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v6.sh"
 
 install_self() {
-    local shortcut_path="/usr/local/bin/jddj"
+    # 路径改为 /usr/bin/，因为部分系统/usr/local/bin可能不在环境变量中
+    local target="/usr/bin/jddj"
     
-    # 1. 防死循环检测：如果已经是快捷命令在运行，则直接返回
-    [ "$0" = "$shortcut_path" ] && return 0
+    # 1. 如果当前已经在作为快捷命令运行，直接跳过
+    [[ "$0" == "$target" ]] && return 0
 
-    # 2. 版本一致性检测：如果系统里已经有该命令且版本一致，则无需重复覆盖
-    local shortcut_ver=""
-    [ -s "$shortcut_path" ] && shortcut_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$shortcut_path" 2>/dev/null | head -1)
-    [ "$shortcut_ver" = "$SCRIPT_VERSION" ] && return 0
+    # 2. 检查版本是否一致
+    local current_ver=""
+    if [[ -s "$target" ]]; then
+        current_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$target" 2>/dev/null | head -1)
+        [[ "$current_ver" == "$SCRIPT_VERSION" ]] && return 0
+    fi
 
-    # 3. 根据运行方式动态写入
-    if [ -f "$0" ]; then
-        # 本地文件运行：直接复制并赋予 755 权限
-        install -m 755 "$0" "$shortcut_path" 2>/dev/null || true
-        log_success "已安装/更新本地快捷命令: jddj"
+    # 3. 动态注册核心逻辑
+    # 增加判断：确保 $0 是文件，并且不是类似 bash 或者 /dev/fd/63 的内存流名字
+    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
+        # 模式 A：如果是本地实体文件运行 (比如: bash jddj.sh)
+        install -m 755 "$0" "$target" 2>/dev/null || true
+        log_success "已安装快捷命令: jddj (本地复制)"
     else
-        # 管道流或网络一键运行：从远程重新下载并赋予 755 权限
-        if curl -fsSL --connect-timeout 5 --max-time 20 "$JDDJ_REMOTE_URL" -o "$shortcut_path" 2>/dev/null && chmod 755 "$shortcut_path" 2>/dev/null; then
-            log_success "已安装/更新远程快捷命令: jddj"
+        # 模式 B：如果是一键脚本运行 (比如: bash <(curl...))，必须依赖 JDDJ_REMOTE_URL
+        if [[ -z "$JDDJ_REMOTE_URL" || "$JDDJ_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
+            log_warn "未配置真实的 JDDJ_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
         else
-            log_warn "快捷命令同步失败（网络问题），但不影响当前使用"
+            if curl -fsSL --connect-timeout 5 --max-time 20 "$JDDJ_REMOTE_URL" -o "$target" 2>/dev/null; then
+                chmod 755 "$target" 2>/dev/null
+                log_success "已安装快捷命令: jddj (远程同步)"
+            else
+                log_warn "快捷命令远程同步失败，请检查网络或 JDDJ_REMOTE_URL 是否正确。"
+            fi
         fi
     fi
+
+    # 强制刷新命令缓存，防止因 bash 缓存导致的 command not found
+    command -v hash &>/dev/null && hash -r
 }
 
 # ────────────────────────────────────────────────────────────────
