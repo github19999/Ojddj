@@ -5,13 +5,11 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 彻底修复退出后输入快捷命令 jddj 提示 Permission denied 的问题：
-#      (完全剥离网络下载依赖，改为直接物理拷贝当前正在运行的脚本，并强制赋予 755 最高执行权限)。
-#   2. 整合 sing-box 安装为严格的 3 重保底链：
-#      ① 官方仓库安装 (APT/DNF) -> 优先级最高，最稳定。
-#      ② 官方 bash 脚本安装 -> (兼容最新 install.sh 与旧版 deb/rpm 脚本)。
-#      ③ GitHub Releases 直接下载二进制 -> 终极兜底。
-#   3. 继承全自动默认配置、端口 443 优化与主菜单返回 0 等所有优化。
+#   1. 彻底解决 jddj 快捷命令 Permission denied 权限被拒问题：
+#      (剥离强依赖网络的逻辑，临时屏蔽 set -e 崩溃机制，暴力赋予 755 权限)。
+#   2. 重构 sing-box 安装逻辑为人性化交互菜单：列出 4 种安装方式供用户自选。
+#      默认把原有的 (deb/rpm) 方式放在第一位，并增加最新脚本、APT仓库、GitHub二进制兜底。
+#   3. 继承所有已有优化：全自动配置、REALITY 默认端口 443、优雅的退出引导提示等。
 # ================================================================
 
 # 遇到错误立即退出
@@ -59,22 +57,40 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (优化 1：彻底解决 Permission Denied)
+#  安装 jddj 快捷命令 (优化 1：彻底根除 Permission Denied)
 # ────────────────────────────────────────────────────────────────
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
+
 install_self() {
     local TARGET="/usr/local/bin/jddj"
     
-    # 1. 避免无限覆盖运行中的自身
+    # 避免递归覆盖自己
     if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$TARGET" ]]; then
         chmod 755 "$TARGET" 2>/dev/null || true
         return
     fi
 
-    # 2. 彻底抛弃网络拉取，只复制当前最新执行的文件，并赋予最高执行权限
-    if [[ -f "$0" && -s "$0" ]]; then
-        cp -f "$0" "$TARGET"
-        chmod 755 "$TARGET"
+    # 临时关闭 set -e，确保即使下载失败，后续的赋权流程也必须执行
+    set +e 
+
+    mkdir -p /usr/local/bin
+    rm -f "$TARGET"
+
+    # 如果是从本地文件执行，直接复制自身代码，断绝网络问题
+    if [[ -f "$0" && -s "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
+        cat "$0" > "$TARGET" 2>/dev/null
+    else
+        # 管道执行时，才进行远程拉取
+        curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null || wget -qO "$TARGET" "$JDDJ_REMOTE_URL" 2>/dev/null
     fi
+
+    # 暴力赋予最高可执行权限
+    if [[ -f "$TARGET" ]]; then
+        chmod +x "$TARGET" 2>/dev/null
+        chmod 755 "$TARGET" 2>/dev/null
+    fi
+
+    set -e # 恢复严格模式
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -589,7 +605,7 @@ menu_basic() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  二、SSL 证书 
+#  二、SSL 证书 (完美融合的独立高级验证模块)
 # ────────────────────────────────────────────────────────────────
 STOPPED_SERVICES_SSL=()
 
@@ -910,7 +926,7 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx）(优化 2：多重 Fallback 链)
+#  三、安装服务（sing-box / Nginx）(优化 2：多级交互与保底逻辑)
 # ────────────────────────────────────────────────────────────────
 setup_singbox_service() {
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
@@ -943,24 +959,23 @@ EOF
         local ver
         ver=$(sing-box version 2>/dev/null | head -1)
         log_success "sing-box 当前状态验证通过: $ver"
+        return 0
     else
         log_error "sing-box 安装校验失败"
+        return 1
     fi
 }
 
-install_singbox_latest() {
-    log_step "尝试 1/3：官方 APT/DNF 仓库源安装 (优先级最高，最稳定)..."
-    local repo_success=false
+install_singbox_repo() {
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt-get update -y >/dev/null 2>&1 || true
         apt-get install -y curl gnupg2 ca-certificates lsb-release >/dev/null 2>&1 || true
         mkdir -p /etc/apt/keyrings
-        if curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc 2>/dev/null; then
-            chmod a+r /etc/apt/keyrings/sagernet.asc
-            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/sagernet.asc] https://deb.sagernet.org/ * *" | tee /etc/apt/sources.list.d/sagernet.list > /dev/null
-            apt-get update -y >/dev/null 2>&1 || true
-            if apt-get install -y sing-box >/dev/null 2>&1; then repo_success=true; fi
-        fi
+        curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc 2>/dev/null || true
+        chmod a+r /etc/apt/keyrings/sagernet.asc 2>/dev/null || true
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/sagernet.asc] https://deb.sagernet.org/ * *" | tee /etc/apt/sources.list.d/sagernet.list > /dev/null
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y sing-box >/dev/null 2>&1 || true
     elif [[ "$PKG_MANAGER" == "yum" || "$PKG_MANAGER" == "dnf" ]]; then
         $PKG_MANAGER install -y curl yum-utils epel-release >/dev/null 2>&1 || true
         if command -v yum-config-manager &>/dev/null; then
@@ -968,24 +983,12 @@ install_singbox_latest() {
         elif command -v dnf &>/dev/null; then
             dnf config-manager --add-repo https://sing-box.app/sing-box.repo >/dev/null 2>&1 || true
         fi
-        if $PKG_MANAGER install -y sing-box >/dev/null 2>&1; then repo_success=true; fi
+        $PKG_MANAGER install -y sing-box >/dev/null 2>&1 || true
     fi
+}
 
-    if [[ "$repo_success" == "true" && -x "$(command -v sing-box)" ]]; then
-        log_success "APT/DNF 仓库包安装成功"
-        return 0
-    fi
-
-    log_warn "方式 1 失败，尝试 2/3：官方 bash 一键安装脚本..."
-    if curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1; then
-        log_success "最新 install.sh 脚本安装成功"
-        return 0
-    elif bash <(curl -fsSL https://sing-box.app/deb-install.sh) >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) >/dev/null 2>&1; then
-        log_success "旧版 deb/rpm 脚本安装成功"
-        return 0
-    fi
-
-    log_warn "方式 2 失败，尝试 3/3：GitHub API 兜底拉取最新 Release 二进制..."
+install_singbox_github() {
+    local is_beta="$1"
     local ARCH
     ARCH=$(uname -m)
     case "$ARCH" in
@@ -994,22 +997,84 @@ install_singbox_latest() {
         armv7l) ARCH_STR="armv7" ;;
         *) ARCH_STR="amd64" ;;
     esac
-    local LATEST_VER
-    LATEST_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-    if [[ -n "$LATEST_VER" ]]; then
-        log_info "获取到 GitHub 最新版本: v$LATEST_VER"
-        local URL="https://github.com/SagerNet/sing-box/releases/download/v${LATEST_VER}/sing-box-${LATEST_VER}-linux-${ARCH_STR}.tar.gz"
+    local TARGET_VER=""
+    if [[ "$is_beta" == "true" ]]; then
+        TARGET_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"v([^"]+)".*/\1/')
+    else
+        TARGET_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+    fi
+    
+    if [[ -n "$TARGET_VER" ]]; then
+        log_info "获取到 GitHub 版本: v$TARGET_VER"
+        local URL="https://github.com/SagerNet/sing-box/releases/download/v${TARGET_VER}/sing-box-${TARGET_VER}-linux-${ARCH_STR}.tar.gz"
         if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz 2>/dev/null || wget -qO /tmp/sing-box.tar.gz "$URL" 2>/dev/null; then
             tar -xzf /tmp/sing-box.tar.gz -C /tmp/
-            install -m 755 "/tmp/sing-box-${LATEST_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
-            rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${LATEST_VER}-linux-${ARCH_STR}"
-            log_success "GitHub 二进制文件直装成功"
-            return 0
+            install -m 755 "/tmp/sing-box-${TARGET_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
+            rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${TARGET_VER}-linux-${ARCH_STR}"
         fi
     fi
+}
 
-    log_error "所有安装方式均失败，请检查服务器网络！"
-    return 1
+install_singbox_interactive() {
+    local is_beta="$1"
+    while true; do
+        clear
+        if [[ "$is_beta" == "true" ]]; then
+            echo -e "${BOLD}${CYAN}══ sing-box Beta/预发布版 安装方式选择 ══${NC}"
+        else
+            echo -e "${BOLD}${CYAN}══ sing-box 稳定版 安装方式选择 ══${NC}"
+        fi
+        echo ""
+        echo "  1) 官方旧版安装脚本 (deb/rpm) [默认/原方案]"
+        echo "  2) 官方新版安装脚本 (install.sh)"
+        echo "  3) 官方仓库源安装 (APT/DNF) [最稳定推荐]"
+        echo "  4) GitHub Releases 二进制下载 (兜底方案)"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择 (默认 1): " m_opt
+        m_opt=${m_opt:-1}
+
+        case $m_opt in
+            0) return 1 ;;
+            1)
+                log_step "正在执行: 官方旧版安装脚本..."
+                if [[ "$is_beta" == "true" ]]; then
+                    bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) beta >/dev/null 2>&1 || true
+                else
+                    bash <(curl -fsSL https://sing-box.app/deb-install.sh) >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/rpm-install.sh) >/dev/null 2>&1 || true
+                fi
+                break
+                ;;
+            2)
+                log_step "正在执行: 官方新版 install.sh..."
+                if [[ "$is_beta" == "true" ]]; then
+                    curl -fsSL https://sing-box.app/install.sh | bash -s -- --beta >/dev/null 2>&1 || true
+                else
+                    curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1 || true
+                fi
+                break
+                ;;
+            3)
+                log_step "正在执行: 官方 APT/DNF 仓库安装..."
+                install_singbox_repo "$is_beta"
+                break
+                ;;
+            4)
+                log_step "正在执行: GitHub Releases 二进制下载..."
+                install_singbox_github "$is_beta"
+                break
+                ;;
+            *) log_warn "无效选择"; sleep 1 ;;
+        esac
+    done
+
+    if setup_singbox_service; then
+        return 0
+    else
+        log_error "当前选择的安装方式失败，请按 Enter 后尝试其他安装选项！"
+        return 1
+    fi
 }
 
 menu_install_service() {
@@ -1033,42 +1098,37 @@ menu_install_service() {
         case $vc in
             0) return ;;
             4) install_nginx ;;
-            1|2|3)
-                if [[ "$vc" == "1" ]]; then
-                    install_singbox_latest || { press_enter; continue; }
-                elif [[ "$vc" == "2" ]]; then
-                    echo -n "请输入版本号（例如 1.9.0）: "
-                    read -r SB_VER
-                    [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; press_enter; continue; }
-                    log_step "安装 sing-box v${SB_VER}..."
-                    local ARCH
-                    ARCH=$(uname -m)
-                    case "$ARCH" in
-                        x86_64) ARCH_STR="amd64" ;;
-                        aarch64) ARCH_STR="arm64" ;;
-                        armv7l) ARCH_STR="armv7" ;;
-                        *) ARCH_STR="amd64" ;;
-                    esac
-                    local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
-                    if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz 2>/dev/null || wget -qO /tmp/sing-box.tar.gz "$URL" 2>/dev/null; then
-                        tar -xzf /tmp/sing-box.tar.gz -C /tmp/
-                        install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
-                        rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
-                        log_success "指定版本安装成功"
-                    else
-                        log_error "下载失败"; press_enter; continue;
-                    fi
-                elif [[ "$vc" == "3" ]]; then
-                    log_step "尝试安装官方最新 Beta 版..."
-                    if curl -fsSL https://sing-box.app/install.sh | bash -s -- --beta >/dev/null 2>&1; then
-                        log_success "Beta 版脚本安装成功"
-                    elif bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta >/dev/null 2>&1; then
-                        log_success "Beta 旧版脚本安装成功"
-                    else
-                        log_error "Beta 安装失败，请检查服务器网络"; press_enter; continue
-                    fi
+            1)
+                install_singbox_interactive "false" || true
+                press_enter
+                ;;
+            2)
+                echo -n "请输入版本号（例如 1.9.0）: "
+                read -r SB_VER
+                [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; press_enter; continue; }
+                log_step "安装 sing-box v${SB_VER}..."
+                local ARCH
+                ARCH=$(uname -m)
+                case "$ARCH" in
+                    x86_64) ARCH_STR="amd64" ;;
+                    aarch64) ARCH_STR="arm64" ;;
+                    armv7l) ARCH_STR="armv7" ;;
+                    *) ARCH_STR="amd64" ;;
+                esac
+                local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
+                if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz 2>/dev/null || wget -qO /tmp/sing-box.tar.gz "$URL" 2>/dev/null; then
+                    tar -xzf /tmp/sing-box.tar.gz -C /tmp/
+                    install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
+                    rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
+                    log_success "指定版本安装成功"
+                else
+                    log_error "下载失败"; press_enter; continue;
                 fi
                 setup_singbox_service
+                press_enter
+                ;;
+            3)
+                install_singbox_interactive "true" || true
                 press_enter
                 ;;
             *) log_warn "无效选择"; sleep 1 ;;
@@ -2620,7 +2680,21 @@ run_all() {
 
     echo ""
     echo -e "${BLUE}── 步骤 3：安装 sing-box ──${NC}"
-    install_singbox_latest
+    
+    # 全部执行时默认走稳定版静默全自动安装链
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y curl gnupg2 ca-certificates lsb-release >/dev/null 2>&1 || true
+        mkdir -p /etc/apt/keyrings
+        curl -fsSL https://sing-box.app/gpg.key -o /etc/apt/keyrings/sagernet.asc 2>/dev/null || true
+        chmod a+r /etc/apt/keyrings/sagernet.asc 2>/dev/null || true
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/sagernet.asc] https://deb.sagernet.org/ * *" | tee /etc/apt/sources.list.d/sagernet.list > /dev/null
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y sing-box >/dev/null 2>&1 || true
+    fi
+    if ! command -v sing-box &>/dev/null; then
+        curl -fsSL https://sing-box.app/install.sh | bash >/dev/null 2>&1 || bash <(curl -fsSL https://sing-box.app/deb-install.sh) >/dev/null 2>&1 || true
+    fi
     setup_singbox_service
 
     echo ""
@@ -2661,8 +2735,7 @@ main_menu() {
         echo "══════════════════════════════════════════════════════"
         echo "   0. 退出"
         echo ""
-        read -rp "请选择 (默认 0): " opt
-        opt=${opt:-0}
+        read -rp "请选择: " opt
         case $opt in
             1) detect_distro; menu_basic ;;
             2) menu_ssl ;;
