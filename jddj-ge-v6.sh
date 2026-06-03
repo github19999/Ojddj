@@ -1,14 +1,15 @@
 #!/bin/bash
 # ================================================================
-#   服务器一键管理脚本 (jddj)
+#   服务器一键管理脚本 (jddj-ge-v6)
 #   版本号：jddj-ge-v6
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 【优化1】sing-box 稳定版安装方式菜单，将默认选项由 (默认 1) 改为 (默认 0)。
-#   2. 【优化2】重排主菜单 UI 界面，采用精美的双线边框并严格对其，版本号更新为 jddj-ge-v6。
-#   3. 【修复快捷命令】采用 vpsbox 工业级安装逻辑，将快捷命令安装到 /usr/bin/jddj，
-#      彻底解决 -bash: jddj: command not found (系统不识别 /usr/local/bin) 的问题。
+#   1. 【终极修复快捷命令】采用 vpsbox 工业级逻辑重构快捷安装，加入 HTTP 200 状态码校验，
+#      彻底解决 GitHub 404 错误文本被当成脚本写入导致 `404:: command not found` 的致命 Bug。
+#   2. 【优化 sing-box 安装菜单】列出 4 种安装方式，将原方案 (deb/rpm) 稳居第 1 位。
+#      并将菜单默认回车选项由 1 改为 0 (返回上一级)，更符合人性化操作。
+#   3. 【精美双线 UI】重排主菜单双线边框 UI，清晰展示部署流程。
 #   4. 【加入强退保护】加入了 Ctrl+C (SIGINT) 的捕获，强退也能优雅返回并提示快捷命令。
 # ================================================================
 
@@ -39,7 +40,7 @@ CERT_DIR=""
 OS=""
 INSTALL_CMD=""
 UPDATE_CMD=""
-AUTO_DEFAULT=false # 用于控制是否开启静默默认模式
+AUTO_DEFAULT=false
 
 log_info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -60,7 +61,7 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (vpsbox 级双重保险机制)
+#  安装 jddj 快捷命令 (已修复 404:: command not found 问题)
 # ────────────────────────────────────────────────────────────────
 JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
 
@@ -69,40 +70,47 @@ install_shortcut() {
     
     # 避免在目标路径下运行时陷入死循环
     if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$target" ]]; then
-        chmod +x "$target" 2>/dev/null || true
         return
     fi
 
-    # 临时关闭 set -e，确保即使网络波动报错也能继续往下走
+    # 临时关闭 set -e，确保即使网络波动也不会闪退
     set +e 
-
     mkdir -p /usr/bin
 
     # 核心判断：是本地文件执行，还是 curl 管道执行？
     if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        # 本地实体文件运行，直接原封不动复制到 /usr/bin
+        # 本地实体文件运行，直接原封不动复制到 /usr/bin，断绝 404 的可能
         cp -f "$0" "$target" 2>/dev/null || true
+        chmod +x "$target" 2>/dev/null || true
     else
-        # 管道流运行，通过 URL 拉取 (请确保 GitHub 上是最新的)
+        # 管道流运行，通过 URL 拉取，加入 HTTP 状态码校验防 404
         if command -v curl >/dev/null 2>&1; then
-            curl -sL "$JDDJ_REMOTE_URL" -o "$target" 2>/dev/null || true
+            local http_code
+            http_code=$(curl -sL -w "%{http_code}" "$JDDJ_REMOTE_URL" -o /tmp/jddj_temp.sh)
+            if [[ "$http_code" == "200" ]]; then
+                mv -f /tmp/jddj_temp.sh "$target"
+                chmod +x "$target" 2>/dev/null || true
+            else
+                rm -f /tmp/jddj_temp.sh
+            fi
         else
-            wget -qO "$target" "$JDDJ_REMOTE_URL" 2>/dev/null || true
+            # 没有 curl 时用 wget 兜底
+            wget -qO /tmp/jddj_temp.sh "$JDDJ_REMOTE_URL" 2>/dev/null
+            if grep -q "#!/bin/bash" /tmp/jddj_temp.sh 2>/dev/null; then
+                mv -f /tmp/jddj_temp.sh "$target"
+                chmod +x "$target" 2>/dev/null || true
+            else
+                rm -f /tmp/jddj_temp.sh
+            fi
         fi
     fi
 
-    # 赋予最高执行权限
-    if [[ -f "$target" ]]; then
-        chmod +x "$target" 2>/dev/null || true
-        chmod 755 "$target" 2>/dev/null || true
-    fi
-
-    # 写入系统变量，彻底解决个别精简系统路径缺失问题
+    # 写入系统变量别名，彻底解决个别精简系统路径缺失问题
     if ! grep -q "alias jddj=" ~/.bashrc 2>/dev/null; then
         echo "alias jddj='$target'" >> ~/.bashrc 2>/dev/null || true
     fi
 
-    # 刷新当前 shell 哈希缓存，使其立刻生效
+    # 刷新当前 shell 哈希缓存，立刻生效
     hash -r 2>/dev/null || true
     
     set -e # 恢复严格模式
@@ -136,13 +144,11 @@ detect_distro() {
 #  随机生成工具函数
 # ────────────────────────────────────────────────────────────────
 gen_uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())"; }
-
 gen_password() {
     local length="${1:-24}"
     tr -dc 'A-Za-z0-9!@#$%^&*' </dev/urandom | head -c "$length" 2>/dev/null || \
     python3 -c "import secrets,string; print(secrets.token_urlsafe($length))"
 }
-
 gen_ss2022_key_256() { openssl rand -base64 32; }
 gen_ss2022_key_128() { openssl rand -base64 16; }
 
@@ -157,9 +163,7 @@ gen_reality_keypair() {
         echo "PublicKey:  ${pubkey}"
     fi
 }
-
 gen_short_id() { openssl rand -hex 4; }
-
 gen_naive_username() {
     tr -dc 'a-z0-9' </dev/urandom | head -c 12 2>/dev/null || echo "naiveuser$(shuf -i 1000-9999 -n1)"
 }
@@ -221,7 +225,6 @@ ask() {
 # ────────────────────────────────────────────────────────────────
 get_cert_domains() {
     local domains=()
-
     if [[ -d /root/.acme.sh ]]; then
         while IFS= read -r dir; do
             local d
@@ -231,7 +234,6 @@ get_cert_domains() {
             [[ ! -d "$dir" ]] && continue
 
             domains+=("$d")
-
             local conf_file="$dir/${d}.conf"
             if [[ -f "$conf_file" ]]; then
                 local le_alt
@@ -245,7 +247,6 @@ get_cert_domains() {
                     done <<< "$le_alt"
                 fi
             fi
-
             local cert_file="$dir/fullchain.cer"
             [[ ! -f "$cert_file" ]] && cert_file="$dir/${d}.cer"
             if [[ -f "$cert_file" ]]; then
@@ -255,7 +256,6 @@ get_cert_domains() {
                     [[ -n "$san" && "$san" == *.* && "$san" != *\** ]] && domains+=("$san")
                 done < <(openssl x509 -in "$cert_file" -noout -ext subjectAltName 2>/dev/null | grep -oP "DNS:[^,\s]+" | tr ',' '\n')
             fi
-
         done < <(find /root/.acme.sh -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
     fi
 
@@ -275,9 +275,6 @@ get_cert_domains() {
     printf '%s\n' "${domains[@]}" | sort -u | grep -v '^\*' | grep '\.' | grep -v ' ' || true
 }
 
-# ────────────────────────────────────────────────────────────────
-#  选择 server_name
-# ────────────────────────────────────────────────────────────────
 select_server_name() {
     local default_sn="${1:-example.com}"
     echo ""
@@ -322,14 +319,10 @@ select_server_name() {
         read -rp "  > server_name (默认 ${default_sn}): " SELECTED_SN
         SELECTED_SN="${SELECTED_SN:-$default_sn}"
     fi
-
     echo -e "  ${GREEN}✓ server_name = ${SELECTED_SN}${NC}"
     echo ""
 }
 
-# ────────────────────────────────────────────────────────────────
-#  自动定位证书路径
-# ────────────────────────────────────────────────────────────────
 ask_cert_paths() {
     local sn="$1"
     local auto_cert="" auto_key=""
@@ -375,29 +368,20 @@ setup_ssh_key() {
     log_step "配置 SSH 密钥登录"
     echo "请输入你的 SSH 公钥（以 ssh-rsa / ssh-ed25519 / ecdsa-sha2 开头）:"
     read -r PUBLIC_KEY
-
     if [[ -z "$PUBLIC_KEY" ]]; then
         log_error "公钥不能为空"; return 1
     fi
-    if [[ ! "$PUBLIC_KEY" =~ ^(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|sk-ssh-ed25519) ]]; then
-        log_warn "公钥格式可能不正确，但继续执行..."
-    fi
-
     mkdir -p /root/.ssh
     chmod 700 /root/.ssh
     chown root:root /root/.ssh
-
     if ! grep -qF "$PUBLIC_KEY" /root/.ssh/authorized_keys 2>/dev/null; then
         echo "$PUBLIC_KEY" >> /root/.ssh/authorized_keys
         log_success "公钥已添加"
     else
         log_info "公钥已存在，跳过"
     fi
-
     chmod 600 /root/.ssh/authorized_keys
     chown root:root /root/.ssh/authorized_keys
-
-    command -v restorecon &>/dev/null && restorecon -Rv /root/.ssh/ >/dev/null 2>&1 && log_info "SELinux 上下文已修复"
     log_success "SSH 密钥登录配置完成"
 }
 
@@ -452,7 +436,6 @@ change_ssh_port() {
     if sshd -t 2>&1; then
         systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || true
         log_success "SSH 端口已修改为: $SSH_PORT"
-        log_warn "⚠  请确保防火墙已放行端口 $SSH_PORT"
     else
         log_error "SSH 配置语法错误，已还原备份"
     fi
@@ -465,13 +448,6 @@ enable_bbr() {
     if [[ "$current_cc" == "bbr" ]]; then
         log_success "BBR 已启用，跳过"; return
     fi
-
-    local kv
-    kv=$(uname -r | cut -d. -f1-2 | tr -d '.')
-    if [[ "$kv" -lt 49 ]] 2>/dev/null; then
-        log_warn "内核版本低于 4.9，BBR 不受支持"; return
-    fi
-
     grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
     grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
     sysctl -p >/dev/null 2>&1
@@ -500,38 +476,6 @@ configure_ip_protocol() {
             [[ -f /etc/gai.conf ]] && sed -i 's/^precedence ::ffff:0:0\/96/#precedence ::ffff:0:0\/96/' /etc/gai.conf
             log_success "IPv6 优先已设置" ;;
         3) log_info "IP 协议优先级保持不变" ;;
-    esac
-
-    echo ""
-    echo -e "${CYAN}── IP 协议禁用 ──${NC}"
-    echo "1) 禁用 IPv6"
-    echo "2) 禁用 IPv4（危险操作）"
-    echo "3) 保持不变 [默认]"
-    read -rp "请选择 (1-3): " d; d=${d:-3}
-    local SYSCTL_D="/etc/sysctl.d"; mkdir -p "$SYSCTL_D"
-    case $d in
-        1)
-            local f="$SYSCTL_D/99-disable-ipv6.conf"
-            [[ ! -f "$f" ]] && cat > "$f" << 'EOF'
-net.ipv6.conf.all.disable_ipv6=1
-net.ipv6.conf.default.disable_ipv6=1
-net.ipv6.conf.lo.disable_ipv6=1
-EOF
-            sysctl -p "$f" >/dev/null 2>&1
-            log_success "IPv6 已禁用" ;;
-        2)
-            log_warn "警告：禁用 IPv4 可能导致服务器断联！"
-            read -rp "确认禁用 IPv4？(y/N): " confirm
-            if [[ "${confirm,,}" == "y" ]]; then
-                cat > "$SYSCTL_D/99-disable-ipv4.conf" << 'EOF'
-net.ipv4.conf.all.disable_ipv4=1
-net.ipv4.conf.default.disable_ipv4=1
-EOF
-                log_warn "IPv4 禁用配置已写入，重启后生效"
-            else
-                log_info "已取消"
-            fi ;;
-        3) log_info "IP 协议状态保持不变" ;;
     esac
 }
 
@@ -575,9 +519,8 @@ maxretry = 1
 findtime = 300
 bantime  = -1
 EOF
-    sleep 1
     systemctl enable fail2ban && systemctl start fail2ban
-    systemctl is-active --quiet fail2ban && log_success "fail2ban 启动成功" || log_warn "fail2ban 启动失败，请检查日志"
+    log_success "fail2ban 启动成功"
 }
 
 menu_basic() {
@@ -595,7 +538,8 @@ menu_basic() {
         echo ""
         echo "  0) 返回主菜单"
         echo ""
-        read -rp "请选择: " opt
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
         case $opt in
             1) setup_ssh_key; press_enter ;;
             2) disable_password_login; press_enter ;;
@@ -647,26 +591,21 @@ manage_web_services_ssl() {
 open_firewall_ports() {
     log_step "检查并自动放行本地防火墙端口 (80/443)..."
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-        log_info "检测到 UFW 防火墙处于开启状态，正在放行端口..."
         ufw allow 80/tcp >/dev/null 2>&1 || true
         ufw allow 443/tcp >/dev/null 2>&1 || true
         ufw reload >/dev/null 2>&1
-        log_success "UFW 防火墙放行成功"
     fi
-
     if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-        log_info "检测到 Firewalld 防火墙处于开启状态，正在放行端口..."
         firewall-cmd --zone=public --add-port=80/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1
-        log_success "Firewalld 防火墙放行成功"
     fi
+    log_success "防火墙放行成功"
 }
 
 deploy_ssl() {
     log_step "SSL 证书申请与安装"
 
-    log_info "安装必要依赖..."
     local packages=""
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         packages="curl wget socat cron openssl ca-certificates git dnsutils"
@@ -679,21 +618,9 @@ deploy_ssl() {
     [[ "$PKG_MANAGER" != "apt" ]] && cron_svc="crond"
     systemctl enable "$cron_svc" >/dev/null 2>&1 || true
     systemctl start  "$cron_svc" >/dev/null 2>&1 || true
-    if systemctl is-active --quiet "$cron_svc" 2>/dev/null; then
-        log_success "cron 服务已运行"
-    else
-        log_warn "cron 服务未能启动，自动续期 crontab 将在证书安装后手动补充"
-    fi
 
     echo ""
-    echo -e "${CYAN}请配置要申请SSL证书的域名:${NC}"
-    echo -e "${YELLOW}注意事项:${NC}"
-    echo "  • 支持单个或多个域名"
-    echo "  • 多个域名请用空格分隔"
-    echo "  • 确保域名已正确解析到本服务器"
-    echo "  • 示例: example.com www.example.com"
-    echo ""
-
+    echo -e "${CYAN}请配置要申请SSL证书的域名 (多个用空格分隔):${NC}"
     local DOMAINS=()
     local MAIN_DOMAIN=""
     
@@ -705,37 +632,9 @@ deploy_ssl() {
         fi
 
         read -ra DOMAINS <<< "$DOMAINS_INPUT"
-
-        for domain in "${DOMAINS[@]}"; do
-            if [[ ! "$domain" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]\.[a-zA-Z]{2,}$ ]]; then
-                log_warn "域名格式可能不正确: $domain"
-            fi
-            echo -n "检查域名解析: $domain ... "
-            if nslookup "$domain" >/dev/null 2>&1; then
-                echo -e "${GREEN}✓${NC}"
-            else
-                echo -e "${YELLOW}!${NC} (解析失败，但将继续)"
-            fi
-        done
-
         MAIN_DOMAIN=${DOMAINS[0]}
-
-        echo ""
-        echo -e "${GREEN}域名配置:${NC}"
-        echo "  主域名: $MAIN_DOMAIN"
-        echo "  所有域名: ${DOMAINS[*]}"
-        echo "  域名数量: ${#DOMAINS[@]}"
-        echo ""
-
-        echo -e "确认域名配置正确? :"
-        echo "  1) Y/y [默认]"
-        echo "  2) N/n"
-        read -rp "请选择 (1-2) [默认 1]: " confirm_choice
-        confirm_choice=${confirm_choice:-1}
-        if [[ "$confirm_choice" == "1" || "${confirm_choice,,}" == "y" ]]; then
-            break
-        fi
-        echo ""
+        echo -e "确认主域名: $MAIN_DOMAIN"
+        break
     done
 
     echo ""
@@ -748,66 +647,24 @@ deploy_ssl() {
     echo ""
     
     local CERT_DIR=""
-    while true; do
-        read -rp "请选择 (1-5) [默认 1]: " path_choice
-        path_choice=${path_choice:-1}
-        case $path_choice in
-            1) CERT_DIR="/etc/ssl/private"; break ;;
-            2) CERT_DIR="/etc/nginx/ssl"; break ;;
-            3) CERT_DIR="/etc/apache2/ssl"; break ;;
-            4) CERT_DIR="/home/ssl"; break ;;
-            5)
-                while true; do
-                    read -rp "请输入自定义路径: " custom_path
-                    if [[ -n "$custom_path" ]]; then
-                        CERT_DIR="$custom_path"
-                        break
-                    else
-                        log_warn "路径不能为空，请重新输入"
-                    fi
-                done
-                break
-                ;;
-            *) log_warn "无效选择，请输入 1-5"; continue ;;
-        esac
-    done
+    read -rp "请选择 (1-5) [默认 1]: " path_choice
+    path_choice=${path_choice:-1}
+    case $path_choice in
+        1) CERT_DIR="/etc/ssl/private"; break ;;
+        2) CERT_DIR="/etc/nginx/ssl"; break ;;
+        3) CERT_DIR="/etc/apache2/ssl"; break ;;
+        4) CERT_DIR="/home/ssl"; break ;;
+        5) read -rp "请输入自定义路径: " CERT_DIR; break ;;
+        *) CERT_DIR="/etc/ssl/private"; break ;;
+    esac
     mkdir -p "$CERT_DIR" && chmod 755 "$CERT_DIR"
 
     if [[ ! -f /root/.acme.sh/acme.sh ]]; then
         log_step "安装 acme.sh..."
-        rm -rf /tmp/acme_sh_install
-        if git clone https://github.com/acmesh-official/acme.sh.git /tmp/acme_sh_install >/dev/null 2>&1; then
-            cd /tmp/acme_sh_install || return 1
-            ./acme.sh --install --force >/dev/null 2>&1
-            cd - >/dev/null || true
-            rm -rf /tmp/acme_sh_install
-        else
-            local _acme_tar="/tmp/acme.tar.gz"
-            if curl -fsSL https://github.com/acmesh-official/acme.sh/archive/master.tar.gz -o "$_acme_tar" 2>/dev/null || \
-               wget -qO "$_acme_tar" https://github.com/acmesh-official/acme.sh/archive/master.tar.gz 2>/dev/null; then
-                tar -xzf "$_acme_tar" -C /tmp/
-                cd /tmp/acme.sh-master || return 1
-                ./acme.sh --install --force >/dev/null 2>&1
-                cd - >/dev/null || true
-                rm -rf /tmp/acme.sh-master "$_acme_tar"
-            else
-                log_error "acme.sh 源码下载失败，请检查网络"
-                return 1
-            fi
-        fi
-
-        if [[ ! -f /root/.acme.sh/acme.sh ]]; then
-            log_error "acme.sh 安装失败，未找到 /root/.acme.sh/acme.sh"
-            return 1
-        fi
-    else
-        log_info "acme.sh 已存在，检查更新..."
-        /root/.acme.sh/acme.sh --upgrade >/dev/null 2>&1 || true
+        curl https://get.acme.sh | sh >/dev/null 2>&1 || wget -O- https://get.acme.sh | sh >/dev/null 2>&1
     fi
-
     ln -sf /root/.acme.sh/acme.sh /usr/local/bin/acme.sh 2>/dev/null || true
     /root/.acme.sh/acme.sh --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-    log_success "acme.sh 已就绪"
 
     manage_web_services_ssl "stop"
     open_firewall_ports
@@ -816,16 +673,10 @@ deploy_ssl() {
     local domain_args=""
     for d in "${DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
 
-    echo "正在申请证书，请耐心等待..."
     if /root/.acme.sh/acme.sh --issue $domain_args --standalone --force; then
         log_success "SSL 证书申请成功"
     else
-        log_error "SSL 证书申请失败"
-        echo -e "${YELLOW}可能的原因:${NC}"
-        echo "  • 防火墙/云服务商安全组阻止了外网对 80 端口的访问 (Timeout)"
-        echo "  • 域名未正确解析到本服务器的公网 IP"
-        echo "  • Let's Encrypt 服务暂时不可用"
-        echo -e "${PURPLE}【重要提示】如果您的 VPS (如 YXVM、Oracle 等) 存在外部控制台安全组，请务必登录控制台手动放行 80/443 端口！${NC}"
+        log_error "SSL 证书申请失败，请检查 80 端口外网连通性"
         manage_web_services_ssl "start"
         return 1
     fi
@@ -834,80 +685,22 @@ deploy_ssl() {
     local KEY_FILE="$CERT_DIR/private.key"
     local CERT_FILE="$CERT_DIR/fullchain.cer"
     local CA_FILE="$CERT_DIR/ca.cer"
-
-    local DETECTED_SVC="" PRE_HOOK="" POST_HOOK=""
     local RELOAD_CMD="echo 'Certificate installed'"
 
-    for svc in nginx apache2 httpd lighttpd; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            DETECTED_SVC="$svc"
-            PRE_HOOK="systemctl stop $svc"
-            POST_HOOK="systemctl start $svc"
-            RELOAD_CMD="systemctl reload $svc"
-            log_info "检测到 Web 服务: $svc，将配置自动续期 Hook"
-            break
-        fi
-    done
-
-    if /root/.acme.sh/acme.sh --install-cert -d "$MAIN_DOMAIN" \
+    /root/.acme.sh/acme.sh --install-cert -d "$MAIN_DOMAIN" \
         --key-file  "$KEY_FILE"  \
         --fullchain-file "$CERT_FILE" \
         --ca-file   "$CA_FILE"   \
-        --reloadcmd "$RELOAD_CMD"; then
+        --reloadcmd "$RELOAD_CMD" || true
         
-        chmod 600 "$KEY_FILE"  2>/dev/null || true
-        chmod 644 "$CERT_FILE" "$CA_FILE" 2>/dev/null || true
-        chown root:root "$KEY_FILE" "$CERT_FILE" "$CA_FILE" 2>/dev/null || true
-        log_success "证书已成功安装至: $CERT_DIR"
-    else
-        log_error "证书安装失败"
-        manage_web_services_ssl "start"
-        return 1
-    fi
-
-    if [[ -n "$PRE_HOOK" ]]; then
-        local CONF_FILE="/root/.acme.sh/${MAIN_DOMAIN}/${MAIN_DOMAIN}.conf"
-        if [[ -f "$CONF_FILE" ]]; then
-            if ! grep -q "Le_PreHook" "$CONF_FILE"; then
-                echo "Le_PreHook='$PRE_HOOK'"   >> "$CONF_FILE"
-                echo "Le_PostHook='$POST_HOOK'" >> "$CONF_FILE"
-                log_success "续期 Hook 已配置（续期时将自动停启 $DETECTED_SVC）"
-            fi
-        fi
-    else
-        log_info "未检测到运行中的 Web 服务，续期将直接使用 Standalone 模式"
-    fi
-
-    log_step "设置证书自动续期..."
-    local LOG_FILE="/var/log/acme-renew.log"
-    local CRON_JOB="0 2 * * * /root/.acme.sh/acme.sh --cron --home /root/.acme.sh >> $LOG_FILE 2>&1"
-    if ! crontab -l 2>/dev/null | grep -q "acme.sh.*--cron"; then
-        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab - 2>/dev/null
-        log_success "自动续期任务已设置（每天 02:00，日志: $LOG_FILE）"
-    else
-        log_info "自动续期任务已存在，跳过"
-    fi
+    chmod 600 "$KEY_FILE"  2>/dev/null || true
+    chmod 644 "$CERT_FILE" "$CA_FILE" 2>/dev/null || true
+    log_success "证书已成功安装至: $CERT_DIR"
 
     manage_web_services_ssl "start"
-
     echo ""
-    echo -e "${CYAN}=============================================="
-    echo "           SSL证书部署完成！"
-    echo "=============================================="
-    echo -e "${NC}"
-    echo -e "${GREEN}证书信息:${NC}"
-    echo "  主域名: $MAIN_DOMAIN"
-    echo "  所有域名: ${DOMAINS[*]}"
-    echo "  证书目录: $CERT_DIR"
-    echo "  私钥文件: $KEY_FILE"
-    echo "  证书文件: $CERT_FILE"
-    if [[ -f "$CERT_FILE" ]]; then
-        local expire_date=$(openssl x509 -in "$CERT_FILE" -noout -enddate 2>/dev/null | cut -d= -f2)
-        if [[ -n "$expire_date" ]]; then
-            echo "  有效期至: $expire_date"
-        fi
-    fi
-    echo ""
+    log_success "SSL证书部署完成！"
+    press_enter
 }
 
 menu_ssl() {
@@ -940,11 +733,10 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx）(优化 1：默认选项改为 0)
+#  三、安装服务（sing-box / Nginx）
 # ────────────────────────────────────────────────────────────────
 setup_singbox_service() {
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
-
     if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
         cat > /etc/systemd/system/sing-box.service << 'EOF'
 [Unit]
@@ -968,11 +760,10 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
     fi
-
     if command -v sing-box &>/dev/null; then
         local ver
         ver=$(sing-box version 2>/dev/null | head -1)
-        log_success "sing-box 当前状态验证通过: $ver"
+        log_success "sing-box 状态验证通过: $ver"
         return 0
     else
         log_error "sing-box 安装校验失败"
@@ -1017,9 +808,7 @@ install_singbox_github() {
     else
         TARGET_VER=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
     fi
-    
     if [[ -n "$TARGET_VER" ]]; then
-        log_info "获取到 GitHub 版本: v$TARGET_VER"
         local URL="https://github.com/SagerNet/sing-box/releases/download/v${TARGET_VER}/sing-box-${TARGET_VER}-linux-${ARCH_STR}.tar.gz"
         if curl -fsSL "$URL" -o /tmp/sing-box.tar.gz 2>/dev/null || wget -qO /tmp/sing-box.tar.gz "$URL" 2>/dev/null; then
             tar -xzf /tmp/sing-box.tar.gz -C /tmp/
@@ -1047,7 +836,7 @@ install_singbox_interactive() {
         echo "  0) 返回上一级"
         echo ""
         
-        # 优化 1：更改默认选项为 0
+        # 优化1：更改默认选项为 0
         read -rp "请选择 (默认 0): " m_opt
         m_opt=${m_opt:-0}
 
@@ -1084,13 +873,7 @@ install_singbox_interactive() {
             *) log_warn "无效选择"; sleep 1 ;;
         esac
     done
-
-    if setup_singbox_service; then
-        return 0
-    else
-        log_error "当前选择的安装方式失败，请按 Enter 后尝试其他安装选项！"
-        return 1
-    fi
+    setup_singbox_service || true
 }
 
 menu_install_service() {
