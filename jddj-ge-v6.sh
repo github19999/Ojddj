@@ -5,12 +5,11 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 【终极修复快捷命令】采用 vpsbox 工业级逻辑重构快捷安装，加入 HTTP 200 状态码校验，
-#      彻底解决 GitHub 404 错误文本被当成脚本写入导致 `404:: command not found` 的致命 Bug。
-#   2. 【优化 sing-box 安装菜单】列出 4 种安装方式，将原方案 (deb/rpm) 稳居第 1 位。
-#      并将菜单默认回车选项由 1 改为 0 (返回上一级)，更符合人性化操作。
-#   3. 【精美双线 UI】重排主菜单双线边框 UI，清晰展示部署流程。
-#   4. 【加入强退保护】加入了 Ctrl+C (SIGINT) 的捕获，强退也能优雅返回并提示快捷命令。
+#   1. 【终极修复】采用 vpsbox 工业级四重注册机制，彻底解决 jddj command not found：
+#      (转移至 /usr/bin + 软链接防失联 + bashrc 强制别名注入 + 即时 source 刷新)。
+#   2. 【防 404 机制】完全剥离 GitHub 远程拉取依赖，只针对本地执行文件进行物理复制。
+#   3. 【菜单优化】sing-box 安装方式中，将原方案稳居第 1 位，默认选项设为 0 (返回)。
+#   4. 【UI 与保护】双线精美 UI 边框，加入 Ctrl+C 强退保护与优雅提示。
 # ================================================================
 
 # 捕获 Ctrl+C 信号，优雅退出终端
@@ -61,59 +60,45 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (已修复 404:: command not found 问题)
+#  安装 jddj 快捷命令 (vpsbox 级工业四重保险)
 # ────────────────────────────────────────────────────────────────
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
-
 install_shortcut() {
-    local target="/usr/bin/jddj"
+    local target_bin="/usr/bin/jddj"
     
-    # 避免在目标路径下运行时陷入死循环
-    if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$target" ]]; then
+    # 防止在目标路径下无限循环复制
+    if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$target_bin" ]]; then
         return
     fi
 
-    # 临时关闭 set -e，确保即使网络波动也不会闪退
-    set +e 
-    mkdir -p /usr/bin
+    set +e # 临时关闭严格模式，防止环境导致中断
 
-    # 核心判断：是本地文件执行，还是 curl 管道执行？
-    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        # 本地实体文件运行，直接原封不动复制到 /usr/bin，断绝 404 的可能
-        cp -f "$0" "$target" 2>/dev/null || true
-        chmod +x "$target" 2>/dev/null || true
-    else
-        # 管道流运行，通过 URL 拉取，加入 HTTP 状态码校验防 404
-        if command -v curl >/dev/null 2>&1; then
-            local http_code
-            http_code=$(curl -sL -w "%{http_code}" "$JDDJ_REMOTE_URL" -o /tmp/jddj_temp.sh)
-            if [[ "$http_code" == "200" ]]; then
-                mv -f /tmp/jddj_temp.sh "$target"
-                chmod +x "$target" 2>/dev/null || true
-            else
-                rm -f /tmp/jddj_temp.sh
-            fi
-        else
-            # 没有 curl 时用 wget 兜底
-            wget -qO /tmp/jddj_temp.sh "$JDDJ_REMOTE_URL" 2>/dev/null
-            if grep -q "#!/bin/bash" /tmp/jddj_temp.sh 2>/dev/null; then
-                mv -f /tmp/jddj_temp.sh "$target"
-                chmod +x "$target" 2>/dev/null || true
-            else
-                rm -f /tmp/jddj_temp.sh
-            fi
-        fi
+    # 1. 物理层复制：只信任本地文件，断绝网络 404
+    if [[ -f "$0" && -s "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
+        mkdir -p /usr/bin
+        cp -f "$0" "$target_bin" 2>/dev/null || true
+        chmod 755 "$target_bin" 2>/dev/null || true
     fi
 
-    # 写入系统变量别名，彻底解决个别精简系统路径缺失问题
-    if ! grep -q "alias jddj=" ~/.bashrc 2>/dev/null; then
-        echo "alias jddj='$target'" >> ~/.bashrc 2>/dev/null || true
+    # 2. 软链接双重保险
+    if [[ -f "$0" && "$0" != "$target_bin" ]]; then
+         ln -sf "$(realpath "$0")" "$target_bin" 2>/dev/null || true
     fi
 
-    # 刷新当前 shell 哈希缓存，立刻生效
+    # 3. Alias 环境变量强制注入 (vpsbox 核心绝招)
+    if [[ -f ~/.bashrc ]]; then
+        # 先清理可能存在的旧的错误 alias
+        sed -i '/alias jddj=/d' ~/.bashrc 2>/dev/null || true
+        # 写入新的别名，直接指向执行本脚本的绝对路径
+        local real_path
+        real_path=$(realpath "$0" 2>/dev/null || echo "$target_bin")
+        echo "alias jddj='bash $real_path'" >> ~/.bashrc
+    fi
+
+    # 4. 立即刷新缓存
     hash -r 2>/dev/null || true
-    
-    set -e # 恢复严格模式
+    source ~/.bashrc 2>/dev/null || true
+
+    set -e
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -538,8 +523,7 @@ menu_basic() {
         echo ""
         echo "  0) 返回主菜单"
         echo ""
-        read -rp "请选择 (默认 0): " opt
-        opt=${opt:-0}
+        read -rp "请选择: " opt
         case $opt in
             1) setup_ssh_key; press_enter ;;
             2) disable_password_login; press_enter ;;
@@ -836,7 +820,7 @@ install_singbox_interactive() {
         echo "  0) 返回上一级"
         echo ""
         
-        # 优化1：更改默认选项为 0
+        # 优化 1：更改默认选项为 0
         read -rp "请选择 (默认 0): " m_opt
         m_opt=${m_opt:-0}
 
