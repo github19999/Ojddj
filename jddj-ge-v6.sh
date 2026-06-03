@@ -1,21 +1,21 @@
 #!/bin/bash
 # ================================================================
-#   服务器一键管理脚本 (jddj-ge-v6)
+#   服务器一键管理脚本 (jddj)
 #   版本号：jddj-ge-v6
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 彻底解决 jddj 快捷命令执行后变成空文件、没有反应、Permission denied 的问题。
-#      (强制物理拷贝当前运行的脚本，剔除 GitHub 旧版回退覆盖漏洞，精准提权 755)。
-#   2. 加入 Ctrl+C (SIGINT) 拦截器，随时强退都能优雅结束，不破坏终端环境。
-#   3. sing-box 稳定版安装方式菜单，将默认选项由 1 优化为 0 (返回上一级)。
-#   4. 精调主菜单 UI，采用双线精美边框，标齐 jddj-ge-v6 版本号。
+#   1. 【优化1】sing-box 稳定版安装方式菜单，将默认选项由 (默认 1) 改为 (默认 0)。
+#   2. 【优化2】重排主菜单 UI 界面，采用精美的双线边框并严格对其，版本号更新为 jddj-ge-v6。
+#   3. 【修复快捷命令】采用 vpsbox 工业级安装逻辑，将快捷命令安装到 /usr/bin/jddj，
+#      彻底解决 -bash: jddj: command not found (系统不识别 /usr/local/bin) 的问题。
+#   4. 【加入强退保护】加入了 Ctrl+C (SIGINT) 的捕获，强退也能优雅返回并提示快捷命令。
 # ================================================================
 
-# 捕获 Ctrl+C 信号，优雅退出并提示
+# 捕获 Ctrl+C 信号，优雅退出终端
 trap 'echo -e "\n${RED}已取消操作，退出脚本。${NC}\n提示：随时可以输入快捷命令 ${BOLD}${GREEN}jddj${NC} 重新进入主菜单。"; exit 0' INT
 
-# 遇到严重错误时立即退出
+# 遇到严重错误立即退出
 set -e  
 
 # ────────────────────────────────────────────────────────────────
@@ -60,31 +60,52 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (已彻底重构：安全复制，杜绝空文件和权限丢失)
+#  安装 jddj 快捷命令 (vpsbox 级双重保险机制)
 # ────────────────────────────────────────────────────────────────
-install_self() {
-    local TARGET="/usr/local/bin/jddj"
-    
-    # 获取当前运行脚本的真实路径和目标快捷方式的真实路径
-    local REAL_SRC
-    REAL_SRC=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
-    local REAL_DST
-    REAL_DST=$(realpath "$TARGET" 2>/dev/null || readlink -f "$TARGET" 2>/dev/null || echo "$TARGET")
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
 
-    # 核心防破坏机制：如果在目标路径运行，直接赋权返回，绝不执行覆盖删除
-    if [[ "$REAL_SRC" == "$REAL_DST" ]]; then
-        chmod +x "$TARGET" 2>/dev/null || true
-        chmod 755 "$TARGET" 2>/dev/null || true
+install_shortcut() {
+    local target="/usr/bin/jddj"
+    
+    # 避免在目标路径下运行时陷入死循环
+    if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$target" ]]; then
+        chmod +x "$target" 2>/dev/null || true
         return
     fi
 
-    # 如果当前运行的是有内容的实体文件，将其复制到系统环境路径
-    if [[ -f "$0" && -s "$0" ]]; then
-        mkdir -p /usr/local/bin
-        cp -f "$0" "$TARGET" 2>/dev/null || true
-        chmod +x "$TARGET" 2>/dev/null || true
-        chmod 755 "$TARGET" 2>/dev/null || true
+    # 临时关闭 set -e，确保即使网络波动报错也能继续往下走
+    set +e 
+
+    mkdir -p /usr/bin
+
+    # 核心判断：是本地文件执行，还是 curl 管道执行？
+    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
+        # 本地实体文件运行，直接原封不动复制到 /usr/bin
+        cp -f "$0" "$target" 2>/dev/null || true
+    else
+        # 管道流运行，通过 URL 拉取 (请确保 GitHub 上是最新的)
+        if command -v curl >/dev/null 2>&1; then
+            curl -sL "$JDDJ_REMOTE_URL" -o "$target" 2>/dev/null || true
+        else
+            wget -qO "$target" "$JDDJ_REMOTE_URL" 2>/dev/null || true
+        fi
     fi
+
+    # 赋予最高执行权限
+    if [[ -f "$target" ]]; then
+        chmod +x "$target" 2>/dev/null || true
+        chmod 755 "$target" 2>/dev/null || true
+    fi
+
+    # 写入系统变量，彻底解决个别精简系统路径缺失问题
+    if ! grep -q "alias jddj=" ~/.bashrc 2>/dev/null; then
+        echo "alias jddj='$target'" >> ~/.bashrc 2>/dev/null || true
+    fi
+
+    # 刷新当前 shell 哈希缓存，使其立刻生效
+    hash -r 2>/dev/null || true
+    
+    set -e # 恢复严格模式
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -144,7 +165,7 @@ gen_naive_username() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  通用输入函数 (含自动默认支持)
+#  通用输入函数
 # ────────────────────────────────────────────────────────────────
 ask_val() {
     local varname="$1"
@@ -574,8 +595,7 @@ menu_basic() {
         echo ""
         echo "  0) 返回主菜单"
         echo ""
-        read -rp "请选择 (默认 0): " opt
-        opt=${opt:-0}
+        read -rp "请选择: " opt
         case $opt in
             1) setup_ssh_key; press_enter ;;
             2) disable_password_login; press_enter ;;
@@ -599,7 +619,7 @@ menu_basic() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  二、SSL 证书 (完美融合的独立高级验证模块)
+#  二、SSL 证书
 # ────────────────────────────────────────────────────────────────
 STOPPED_SERVICES_SSL=()
 
@@ -920,7 +940,7 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx）(优化 2：多重 Fallback 链与默认选项)
+#  三、安装服务（sing-box / Nginx）(优化 1：默认选项改为 0)
 # ────────────────────────────────────────────────────────────────
 setup_singbox_service() {
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
@@ -1027,7 +1047,7 @@ install_singbox_interactive() {
         echo "  0) 返回上一级"
         echo ""
         
-        # 优化1：将此处的默认值由 1 修改为 0
+        # 优化 1：更改默认选项为 0
         read -rp "请选择 (默认 0): " m_opt
         m_opt=${m_opt:-0}
 
@@ -2763,5 +2783,5 @@ main_menu() {
 #  入口
 # ────────────────────────────────────────────────────────────────
 check_root
-install_self
+install_shortcut
 main_menu
