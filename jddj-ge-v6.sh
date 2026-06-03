@@ -1,18 +1,21 @@
 #!/bin/bash
 # ================================================================
-#   服务器一键管理脚本 (jddj)
+#   服务器一键管理脚本 (jddj-ge-v6)
 #   版本号：jddj-ge-v6
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v6)】
-#   1. 彻底解决 jddj 快捷命令 Permission denied 权限被拒问题：
-#      (剥离强依赖网络的逻辑，临时屏蔽 set -e 崩溃机制，暴力赋予 755 权限)。
-#   2. 重构 sing-box 安装逻辑为人性化交互菜单：列出 4 种安装方式供用户自选。
-#      默认把原有的 (deb/rpm) 方式放在第一位，并增加最新脚本、APT仓库、GitHub二进制兜底。
-#   3. 继承所有已有优化：全自动配置、REALITY 默认端口 443、优雅的退出引导提示等。
+#   1. 彻底解决 jddj 快捷命令执行后变成空文件、没有反应、Permission denied 的问题。
+#      (强制物理拷贝当前运行的脚本，剔除 GitHub 旧版回退覆盖漏洞，精准提权 755)。
+#   2. 加入 Ctrl+C (SIGINT) 拦截器，随时强退都能优雅结束，不破坏终端环境。
+#   3. sing-box 稳定版安装方式菜单，将默认选项由 1 优化为 0 (返回上一级)。
+#   4. 精调主菜单 UI，采用双线精美边框，标齐 jddj-ge-v6 版本号。
 # ================================================================
 
-# 遇到错误立即退出
+# 捕获 Ctrl+C 信号，优雅退出并提示
+trap 'echo -e "\n${RED}已取消操作，退出脚本。${NC}\n提示：随时可以输入快捷命令 ${BOLD}${GREEN}jddj${NC} 重新进入主菜单。"; exit 0' INT
+
+# 遇到严重错误时立即退出
 set -e  
 
 # ────────────────────────────────────────────────────────────────
@@ -57,40 +60,31 @@ check_root() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (优化 1：彻底根除 Permission Denied)
+#  安装 jddj 快捷命令 (已彻底重构：安全复制，杜绝空文件和权限丢失)
 # ────────────────────────────────────────────────────────────────
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj.sh"
-
 install_self() {
     local TARGET="/usr/local/bin/jddj"
     
-    # 避免递归覆盖自己
-    if [[ "$(realpath "$0" 2>/dev/null || echo "$0")" == "$TARGET" ]]; then
+    # 获取当前运行脚本的真实路径和目标快捷方式的真实路径
+    local REAL_SRC
+    REAL_SRC=$(realpath "$0" 2>/dev/null || readlink -f "$0" 2>/dev/null || echo "$0")
+    local REAL_DST
+    REAL_DST=$(realpath "$TARGET" 2>/dev/null || readlink -f "$TARGET" 2>/dev/null || echo "$TARGET")
+
+    # 核心防破坏机制：如果在目标路径运行，直接赋权返回，绝不执行覆盖删除
+    if [[ "$REAL_SRC" == "$REAL_DST" ]]; then
+        chmod +x "$TARGET" 2>/dev/null || true
         chmod 755 "$TARGET" 2>/dev/null || true
         return
     fi
 
-    # 临时关闭 set -e，确保即使下载失败，后续的赋权流程也必须执行
-    set +e 
-
-    mkdir -p /usr/local/bin
-    rm -f "$TARGET"
-
-    # 如果是从本地文件执行，直接复制自身代码，断绝网络问题
-    if [[ -f "$0" && -s "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        cat "$0" > "$TARGET" 2>/dev/null
-    else
-        # 管道执行时，才进行远程拉取
-        curl -fsSL "$JDDJ_REMOTE_URL" -o "$TARGET" 2>/dev/null || wget -qO "$TARGET" "$JDDJ_REMOTE_URL" 2>/dev/null
+    # 如果当前运行的是有内容的实体文件，将其复制到系统环境路径
+    if [[ -f "$0" && -s "$0" ]]; then
+        mkdir -p /usr/local/bin
+        cp -f "$0" "$TARGET" 2>/dev/null || true
+        chmod +x "$TARGET" 2>/dev/null || true
+        chmod 755 "$TARGET" 2>/dev/null || true
     fi
-
-    # 暴力赋予最高可执行权限
-    if [[ -f "$TARGET" ]]; then
-        chmod +x "$TARGET" 2>/dev/null
-        chmod 755 "$TARGET" 2>/dev/null
-    fi
-
-    set -e # 恢复严格模式
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -926,7 +920,7 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx）(优化 2：多级交互与保底逻辑)
+#  三、安装服务（sing-box / Nginx）(优化 2：多重 Fallback 链与默认选项)
 # ────────────────────────────────────────────────────────────────
 setup_singbox_service() {
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
@@ -1032,8 +1026,10 @@ install_singbox_interactive() {
         echo ""
         echo "  0) 返回上一级"
         echo ""
-        read -rp "请选择 (默认 1): " m_opt
-        m_opt=${m_opt:-1}
+        
+        # 优化1：将此处的默认值由 1 修改为 0
+        read -rp "请选择 (默认 0): " m_opt
+        m_opt=${m_opt:-0}
 
         case $m_opt in
             0) return 1 ;;
@@ -2681,7 +2677,6 @@ run_all() {
     echo ""
     echo -e "${BLUE}── 步骤 3：安装 sing-box ──${NC}"
     
-    # 全部执行时默认走稳定版静默全自动安装链
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt-get update -y >/dev/null 2>&1 || true
         apt-get install -y curl gnupg2 ca-certificates lsb-release >/dev/null 2>&1 || true
@@ -2718,13 +2713,14 @@ run_all() {
 #  主菜单
 # ────────────────────────────────────────────────────────────────
 main_menu() {
+    # 保证主循环不因个别子命令返回非零值而意外退出
+    set +e 
     while true; do
         clear
-        echo -e "${BOLD}${CYAN}"
-        echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  ($SCRIPT_VERSION)            ║"
-        echo "╚══════════════════════════════════════════════════════╝"
-        echo -e "${NC}"
+        echo -e "${CYAN}╔══════════════════════════════════════════════════════╗${NC}"
+        echo -e "${CYAN}║          服务器一键管理脚本  ($SCRIPT_VERSION)            ║${NC}"
+        echo -e "${CYAN}╚══════════════════════════════════════════════════════╝${NC}"
+        echo ""
         echo "  部署流程:"
         echo -e "   ${GREEN}1.${NC} 基础设置（SSH/fail2ban/BBR）       ${GREEN}2.${NC} SSL 证书申请与安装"
         echo -e "   ${GREEN}3.${NC} 安装 sing-box                      ${GREEN}4.${NC} 配置 sing-box"
@@ -2732,10 +2728,16 @@ main_menu() {
         echo ""
         echo -e "   ${YELLOW}7.${NC} ── 全部执行（1→6）──"
         echo ""
-        echo "══════════════════════════════════════════════════════"
+        echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
         echo "   0. 退出"
         echo ""
         read -rp "请选择: " opt
+        
+        # 处理空输入
+        if [[ -z "$opt" ]]; then
+            continue
+        fi
+
         case $opt in
             1) detect_distro; menu_basic ;;
             2) menu_ssl ;;
@@ -2747,7 +2749,7 @@ main_menu() {
             0)
                 echo ""
                 echo -e "${GREEN}感谢使用，再见！${NC}"
-                echo -e "${YELLOW}提示：退出脚本后，随时可以输入快捷命令 ${BOLD}${GREEN}jddj${NC}${YELLOW} 重新进入主菜单。${NC}"
+                echo -e "提示：退出脚本后，随时可以输入快捷命令 ${BOLD}${GREEN}jddj${NC} 重新进入主菜单。"
                 echo ""
                 exit 0 ;;
             *)
