@@ -1,17 +1,17 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.2 (终极修复版)
+#   版本号：jddj-ge-v7.3 (终极修复版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (jddj-ge-v7.2 终极修复版)】
-#   1. 修复严重 BUG (PROTO_CHOICES 截断)：恢复了“全部自动配置”时生成所有
+# 【本次优化内容 (jddj-ge-v7.3 终极修复版)】
+#   1. 修复致命 BUG (SNI 漂移断连)：彻底移除 v7.2 中自作聪明的 IP 剥离逻辑。
+#      现在如果旧链接没有明确的 SNI/Host，脚本会完美抓取对应的服务器 IP，
+#      确保服务端生成的 Host 验证规则与旧客户端发送的数据 100% 一致。
+#   2. 修复严重 BUG (PROTO_CHOICES 截断)：恢复了“全部自动配置”时生成所有
 #      1~15 项协议的完整逻辑，解决部分节点未被写入配置文件的问题。
-#   2. 修复严重 BUG (SNI 解析污染)：严格校验 Python 解析出的 SNI，
-#      如果提取到的是 IPv4 或 IPv6 地址，将主动置空，以触发后续正确的域名回退机制，
-#      彻底解决 TLS 因为错误匹配 IP 而握手失败的断连问题。
 #   3. 优化 Shadowsocks 解析：兼容未进行 base64 编码的旧版 SS 链接导入。
-#   4. 继承 v7.1 核心：UUID 绑定推导 Reality 密钥对机制持续生效。
+#   4. 继承核心：UUID 绑定推导 Reality 密钥对机制持续生效。
 # ================================================================
 
 # 遇到错误立即退出
@@ -30,7 +30,7 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # 全局变量
-SCRIPT_VERSION="jddj-ge-v7.2"
+SCRIPT_VERSION="jddj-ge-v7.3"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -38,7 +38,7 @@ CERT_DIR=""
 OS=""
 INSTALL_CMD=""
 UPDATE_CMD=""
-AUTO_DEFAULT=false # 用于控制是否开启静默默认模式
+AUTO_DEFAULT=false
 
 log_info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -193,11 +193,6 @@ ask_random() {
     printf -v "$varname" '%s' "$result"
 }
 
-ask() {
-    local prompt="$1" default="$2"
-    ask_val REPLY_VAL "$prompt" "$default"
-}
-
 # ────────────────────────────────────────────────────────────────
 #  读取已安装证书域名
 # ────────────────────────────────────────────────────────────────
@@ -258,7 +253,7 @@ get_cert_domains() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  选择 server_name (已适配提取旧 SNI)
+#  选择 server_name (适配了旧 SNI / Host)
 # ────────────────────────────────────────────────────────────────
 select_server_name() {
     local default_sn="${1:-example.com}"
@@ -283,7 +278,7 @@ select_server_name() {
     fi
 
     if [[ -n "$old_sni" ]]; then
-        echo -e "    ${YELLOW}检测到旧节点的 SNI 为: ${old_sni}${NC}"
+        echo -e "    ${YELLOW}检测到旧节点的 SNI/Host 为: ${old_sni}${NC}"
         default_sn="$old_sni"
     fi
 
@@ -1888,7 +1883,6 @@ EOF
 }
 
 configure_singbox() {
-    # 如果系统未装 python3，尝试通过包管理器静默补充（解析依赖 Python）
     if ! command -v python3 &>/dev/null; then
         log_info "正在预装 python3 以支持节点解析..."
         if command -v apt &>/dev/null; then apt install -y python3 >/dev/null 2>&1;
@@ -1901,7 +1895,6 @@ configure_singbox() {
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
-        # --- 新增/修复: 导入旧节点解析，加入状态检测防止因切换菜单丢失 ---
         local has_old_data=false
         [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
 
@@ -1922,7 +1915,6 @@ configure_singbox() {
         if [[ "$import_choice" == "1" ]]; then
             echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
             
-            # 使用安全的临时文件接收多行输入，彻底规避 Bash 变量及 `-e` 导致的乱码问题
             local links_file=$(mktemp /tmp/old_links.XXXXXX)
             local has_input=false
             
@@ -1934,12 +1926,10 @@ configure_singbox() {
             
             if [[ "$has_input" == "true" ]]; then
                 log_info "正在解析旧节点数据..."
-                # 借助 Python 强力解析引擎，生成环境变量供 Bash 继承
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
                 cat > "$py_script" << 'PYEOF'
 import sys, urllib.parse, base64, json, re
 
-# [核心修复]: 强制让 urlparse 支持非标准协议，否则 username/password 会解析失败！
 schemes = ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "anytls", "naive+https"]
 for s in schemes:
     if s not in urllib.parse.uses_netloc:
@@ -1948,7 +1938,6 @@ for s in schemes:
 input_text = sys.stdin.read().strip()
 if not input_text: sys.exit(0)
 
-# Check for base64 block
 if "://" not in input_text:
     try:
         input_text = base64.b64decode(input_text).decode("utf-8")
@@ -1967,13 +1956,11 @@ for line in input_text.splitlines():
             uid = obj.get("id")
             net = obj.get("net")
             path = obj.get("path", "")
-            sni = obj.get("sni", "") or obj.get("host", "")
             
-            # [核心修复]: 清除误提的 IP 地址，防止 TLS 握手失败
-            if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
-                sni = ""
-
-            if net == "ws" or "ws" in obj.get("ps", ""):
+            # 【终极修复】: 原汁原味提取。如果客户端没写 SNI，连服务器 IP 也要原样作为 fallback 带入 bash
+            sni = obj.get("sni", "") or obj.get("host", "") or obj.get("add", "")
+            
+            if net == "ws" or "ws" in str(obj.get("ps", "")):
                 if uid: vars_out["OLD_VMESS_WS_UUID"] = uid
                 if port: vars_out["OLD_VMESS_WS_PORT"] = port
                 if path: vars_out["OLD_VMESS_WS_PATH"] = path
@@ -1986,7 +1973,6 @@ for line in input_text.splitlines():
             parsed = urllib.parse.urlparse(line)
             scheme = parsed.scheme
             
-            # 稳健的 netloc 手工解包
             netloc = parsed.netloc
             if "@" in netloc:
                 userinfo, hostport = netloc.split("@", 1)
@@ -2002,12 +1988,10 @@ for line in input_text.splitlines():
             qs = urllib.parse.parse_qs(parsed.query)
             tag = parsed.fragment or ""
             
-            # [核心修复]: 正确回退 SNI，并彻底拦截 IPv4/IPv6，解决“更多不通”的问题
-            _sni_raw = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or qs.get("peer", [""])[0] or host
-            if _sni_raw and (re.match(r'^[\d\.]+$', _sni_raw) or ":" in _sni_raw):
-                sni = ""
-            else:
-                sni = _sni_raw
+            # 【终极修复】: 原汁原味提取。绝对不剥离 IP！防止由于剥离导致的握手配置断档
+            sni = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or qs.get("peer", [""])[0]
+            if not sni:
+                sni = host
             
             if scheme == "vless":
                 uuid = userinfo
@@ -2049,7 +2033,6 @@ for line in input_text.splitlines():
                     if sni: vars_out["OLD_TROJAN_TCP_SNI"] = sni
             elif scheme == "ss":
                 try:
-                    # [核心修复]: 支持纯文本和Base64两种 SS 解析格式
                     try:
                         raw = base64.urlsafe_b64decode(userinfo + "===").decode("utf-8")
                     except:
@@ -2095,16 +2078,17 @@ for line in input_text.splitlines():
                 if port: vars_out["OLD_ANYTLS_PORT"] = port
                 if sni: vars_out["OLD_ANYTLS_SNI"] = sni
             elif scheme == "naive+https":
-                pwd = parsed.password
-                uname = parsed.username
-                if pwd: vars_out["OLD_NAIVE_PWD"] = urllib.parse.unquote(pwd)
-                if uname: vars_out["OLD_NAIVE_UNAME"] = urllib.parse.unquote(uname)
+                if ":" in userinfo:
+                    uname, pwd = userinfo.split(":", 1)
+                    if pwd: vars_out["OLD_NAIVE_PWD"] = urllib.parse.unquote(pwd)
+                    if uname: vars_out["OLD_NAIVE_UNAME"] = urllib.parse.unquote(uname)
+                elif userinfo:
+                    vars_out["OLD_NAIVE_UNAME"] = urllib.parse.unquote(userinfo)
                 if port: vars_out["OLD_NAIVE_PORT"] = port
                 if sni: vars_out["OLD_NAIVE_SNI"] = sni
     except Exception:
         pass
 
-# 将验证结果通过脚本动态输出
 if not vars_out:
     print("echo -e \"\\033[1;33m[WARN] 未能从输入内容中提取到任何有效参数（可能格式不支持或为空），将继续常规生成。\\033[0m\";")
 else:
@@ -2112,7 +2096,6 @@ else:
         print(f"export {k}=\"{v}\"")
     print("echo -e \"\\033[0;32m[✓] 解析完成，已成功提取匹配节点的参数（涵盖端口、密码、UUID、流控及 SNI 等）。\\033[0m\";")
 PYEOF
-                # 执行解析并导出环境变量供 Bash 读取
                 local parse_exports
                 parse_exports=$(python3 "$py_script" < "$links_file")
                 eval "$parse_exports"
@@ -2126,7 +2109,6 @@ PYEOF
             echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
             echo ""
         fi
-        # ---------------------------------
 
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
@@ -2170,7 +2152,6 @@ PYEOF
             if [[ "$choice" == "16" ]]; then has_16=true; fi
         done
 
-        # [核心修复]: 这里恢复了 1~15 项协议的完整列表！
         if [[ "$has_17" == "true" ]]; then
             PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
             AUTO_DEFAULT=true
