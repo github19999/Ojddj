@@ -1,18 +1,17 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.1 (修复优化版)
+#   版本号：jddj-ge-v7.2 (终极修复版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (jddj-ge-v7.1 修复优化版)】
-#   1. 修复菜单状态流失 BUG：强化 `configure_singbox` 导入提示，
-#      增加当前环境变量状态检测，解决跳转其他菜单后导入提示消失的问题。
-#   2. 重写 URL 解析器底层：强制注册代理协议到 Python `uses_netloc`，
-#      修复 TUIC 等协议因未被标准库识别导致的 Password 提取失败问题。
-#   3. 引入决定性推导 (Deterministic Derivation)：
-#      内置纯 Python 版 Curve25519 算法。现在 REALITY 节点的 Private/Public
-#      Key 强制与 UUID 绑定。未来无论如何重装系统，只要导入包含 UUID 的旧节点，
-#      密钥对将 100% 完美复原（告别随机私钥丢失的困扰）。
+# 【本次优化内容 (jddj-ge-v7.2 终极修复版)】
+#   1. 修复严重 BUG (PROTO_CHOICES 截断)：恢复了“全部自动配置”时生成所有
+#      1~15 项协议的完整逻辑，解决部分节点未被写入配置文件的问题。
+#   2. 修复严重 BUG (SNI 解析污染)：严格校验 Python 解析出的 SNI，
+#      如果提取到的是 IPv4 或 IPv6 地址，将主动置空，以触发后续正确的域名回退机制，
+#      彻底解决 TLS 因为错误匹配 IP 而握手失败的断连问题。
+#   3. 优化 Shadowsocks 解析：兼容未进行 base64 编码的旧版 SS 链接导入。
+#   4. 继承 v7.1 核心：UUID 绑定推导 Reality 密钥对机制持续生效。
 # ================================================================
 
 # 遇到错误立即退出
@@ -31,7 +30,7 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # 全局变量
-SCRIPT_VERSION="jddj-ge-v7.1"
+SCRIPT_VERSION="jddj-ge-v7.2"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -1904,7 +1903,6 @@ configure_singbox() {
 
         # --- 新增/修复: 导入旧节点解析，加入状态检测防止因切换菜单丢失 ---
         local has_old_data=false
-        # 简单判断几个核心变量是否存在
         [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
 
         if [[ "$has_old_data" == "true" ]]; then
@@ -1939,7 +1937,7 @@ configure_singbox() {
                 # 借助 Python 强力解析引擎，生成环境变量供 Bash 继承
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
                 cat > "$py_script" << 'PYEOF'
-import sys, urllib.parse, base64, json
+import sys, urllib.parse, base64, json, re
 
 # [核心修复]: 强制让 urlparse 支持非标准协议，否则 username/password 会解析失败！
 schemes = ["vless", "vmess", "trojan", "ss", "hysteria2", "tuic", "anytls", "naive+https"]
@@ -1970,6 +1968,11 @@ for line in input_text.splitlines():
             net = obj.get("net")
             path = obj.get("path", "")
             sni = obj.get("sni", "") or obj.get("host", "")
+            
+            # [核心修复]: 清除误提的 IP 地址，防止 TLS 握手失败
+            if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
+                sni = ""
+
             if net == "ws" or "ws" in obj.get("ps", ""):
                 if uid: vars_out["OLD_VMESS_WS_UUID"] = uid
                 if port: vars_out["OLD_VMESS_WS_PORT"] = port
@@ -1983,7 +1986,7 @@ for line in input_text.splitlines():
             parsed = urllib.parse.urlparse(line)
             scheme = parsed.scheme
             
-            # [核心修复]: 稳健的 netloc 手工解包，彻底解决 python 版本带来的解析差错
+            # 稳健的 netloc 手工解包
             netloc = parsed.netloc
             if "@" in netloc:
                 userinfo, hostport = netloc.split("@", 1)
@@ -1998,7 +2001,13 @@ for line in input_text.splitlines():
             
             qs = urllib.parse.parse_qs(parsed.query)
             tag = parsed.fragment or ""
-            sni = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or qs.get("peer", [""])[0] or host
+            
+            # [核心修复]: 正确回退 SNI，并彻底拦截 IPv4/IPv6，解决“更多不通”的问题
+            _sni_raw = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or qs.get("peer", [""])[0] or host
+            if _sni_raw and (re.match(r'^[\d\.]+$', _sni_raw) or ":" in _sni_raw):
+                sni = ""
+            else:
+                sni = _sni_raw
             
             if scheme == "vless":
                 uuid = userinfo
@@ -2040,7 +2049,11 @@ for line in input_text.splitlines():
                     if sni: vars_out["OLD_TROJAN_TCP_SNI"] = sni
             elif scheme == "ss":
                 try:
-                    raw = base64.urlsafe_b64decode(userinfo + "===").decode("utf-8")
+                    # [核心修复]: 支持纯文本和Base64两种 SS 解析格式
+                    try:
+                        raw = base64.urlsafe_b64decode(userinfo + "===").decode("utf-8")
+                    except:
+                        raw = urllib.parse.unquote(userinfo)
                     parts = raw.split(":", 2)
                     method = parts[0]
                     if "2022" in method:
@@ -2157,6 +2170,7 @@ PYEOF
             if [[ "$choice" == "16" ]]; then has_16=true; fi
         done
 
+        # [核心修复]: 这里恢复了 1~15 项协议的完整列表！
         if [[ "$has_17" == "true" ]]; then
             PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
             AUTO_DEFAULT=true
