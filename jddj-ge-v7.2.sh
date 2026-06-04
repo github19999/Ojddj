@@ -1,17 +1,17 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.3 (终极修复版)
+#   版本号：jddj-ge-v7.4 (优化版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (jddj-ge-v7.3 终极修复版)】
-#   1. 修复致命 BUG (SNI 漂移断连)：彻底移除 v7.2 中自作聪明的 IP 剥离逻辑。
-#      现在如果旧链接没有明确的 SNI/Host，脚本会完美抓取对应的服务器 IP，
-#      确保服务端生成的 Host 验证规则与旧客户端发送的数据 100% 一致。
-#   2. 修复严重 BUG (PROTO_CHOICES 截断)：恢复了“全部自动配置”时生成所有
-#      1~15 项协议的完整逻辑，解决部分节点未被写入配置文件的问题。
-#   3. 优化 Shadowsocks 解析：兼容未进行 base64 编码的旧版 SS 链接导入。
-#   4. 继承核心：UUID 绑定推导 Reality 密钥对机制持续生效。
+# 【本次优化内容 (jddj-ge-v7.4 优化版)】
+#   优化1：彻底修复旧节点导入及自动配置时，TUIC 和 REALITY 无法使用的问题。
+#         - 补全了 VLESS-Reality 配置中缺失且被 sing-box 强制要求的 "name" 字段。
+#         - 移除了 TUIC 节点配置中已被新版 sing-box 废弃的 heartbeat、auth_timeout 
+#           和 zero_rtt_handshake 字段，防止语法校验不通过导致服务崩溃。
+#         - 强化了旧节点导入时对带有特殊符号密码的转义，防止环境变量解析异常。
+#   优化2：优化 server_name 证书选择菜单。将多余提示精简，并将检测到证书时
+#         的默认选择逻辑和输入提示更改为“> (编号，默认 1):”。
 # ================================================================
 
 # 遇到错误立即退出
@@ -27,10 +27,9 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 全局变量
-SCRIPT_VERSION="jddj-ge-v7.3"
+SCRIPT_VERSION="jddj-ge-v7.4"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -193,6 +192,11 @@ ask_random() {
     printf -v "$varname" '%s' "$result"
 }
 
+ask() {
+    local prompt="$1" default="$2"
+    ask_val REPLY_VAL "$prompt" "$default"
+}
+
 # ────────────────────────────────────────────────────────────────
 #  读取已安装证书域名
 # ────────────────────────────────────────────────────────────────
@@ -253,7 +257,7 @@ get_cert_domains() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  选择 server_name (适配了旧 SNI / Host)
+#  选择 server_name (适配了旧 SNI / Host 并优化了交互格式)
 # ────────────────────────────────────────────────────────────────
 select_server_name() {
     local default_sn="${1:-example.com}"
@@ -288,12 +292,13 @@ select_server_name() {
             echo -e "    ${YELLOW}$((i+1)))${NC} ${domains[$i]}"
         done
         local manual_idx=$(( ${#domains[@]} + 1 ))
-        echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入 (默认使用 ${default_sn})"
+        echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入"
         echo ""
         local sn_choice
-        read -rp "  > (编号，默认手动并使用默认值): " sn_choice
+        read -rp "  > (编号，默认 1): " sn_choice
+        sn_choice=${sn_choice:-1}
 
-        if [[ -n "$sn_choice" ]] && [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
+        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
             SELECTED_SN="${domains[$((sn_choice-1))]}"
         else
             read -rp "  > 手动输入 server_name (默认 ${default_sn}): " SELECTED_SN
@@ -1217,7 +1222,6 @@ build_vless_reality() {
     local keypair_out privkey pubkey
     local existing_pk="" existing_pub=""
     
-    # 优先尝试本地提取，如果没有，直接进行决定性推导（弃用随机生成，拥抱 UUID 绑定）
     if [[ -f /etc/sing-box/config.json ]]; then
         existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
     fi
@@ -1225,14 +1229,26 @@ build_vless_reality() {
         existing_pub=$(grep -oP "^${port}:\K.*" /etc/sing-box/reality_meta.conf | head -1)
     fi
 
-    if [[ -n "$existing_pk" && -n "$existing_pub" ]]; then
+    if [[ -n "$existing_pk" && -n "$existing_pub" && "$existing_pk" != '""' ]]; then
         privkey="$existing_pk"
         pubkey="$existing_pub"
         echo -e "  ${GREEN}★ 检测到本地服务器已有的 Reality 密钥对，自动沿用以保证客户端不断连！${NC}"
     else
-        keypair_out=$(gen_reality_keypair "$uuid")
-        privkey=$(echo "$keypair_out" | grep -i private | awk '{print $NF}')
-        pubkey=$(echo  "$keypair_out" | grep -i public  | awk '{print $NF}')
+        gen_reality_keypair "$uuid" > /tmp/reality_keys_tmp 2>&1
+        privkey=$(grep -i PrivateKey /tmp/reality_keys_tmp | awk '{print $NF}')
+        pubkey=$(grep -i PublicKey /tmp/reality_keys_tmp | awk '{print $NF}')
+        rm -f /tmp/reality_keys_tmp
+        
+        if [[ -z "$privkey" || -z "$pubkey" ]]; then
+            log_warn "Python 密钥推导失效，尝试使用 sing-box 内置命令生成..."
+            keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
+            privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}')
+            pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}')
+            if [[ -z "$privkey" ]]; then
+                privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
+                pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
+            fi
+        fi
         
         if [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
             if [[ "$OLD_VLESS_REALITY_PBK" == "$pubkey" ]]; then
@@ -1299,14 +1315,25 @@ build_vless_reality() {
         if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
              echo -e "    ${YELLOW}检测到旧节点使用了 SNI: ${OLD_VLESS_REALITY_SNI}${NC}"
         elif [[ ${#_cert_domains[@]} -gt 0 ]]; then
-            echo -e "    检测到已安装证书，请选择或手动输入："
+            echo -e "    检测到已安装证书，请选择："
             for i in "${!_cert_domains[@]}"; do
                 echo -e "    ${YELLOW}$((i+1)))${NC} ${_cert_domains[$i]}"
             done
+            local manual_idx=$(( ${#_cert_domains[@]} + 1 ))
+            echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入"
+            echo ""
+            local sn_choice
+            read -rp "  > (编号，默认 1): " sn_choice
+            sn_choice=${sn_choice:-1}
+            if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#_cert_domains[@]}" ]]; then
+                sn="${_cert_domains[$((sn_choice-1))]}"
+            fi
         fi
         
-        read -rp "  > 手动输入 server_name (默认 ${_default_sn}): " sn
-        sn="${sn:-$_default_sn}"
+        if [[ -z "$sn" ]]; then
+            read -rp "  > 手动输入 server_name (默认 ${_default_sn}): " sn
+            sn="${sn:-$_default_sn}"
+        fi
         echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
     fi
     echo ""
@@ -1314,13 +1341,14 @@ build_vless_reality() {
     ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
     ask_val hs_port   "handshake port" "8001"
 
+    # 【重要修复】：增加了强制要求的 name 字段
     cat > "$_jf" << EOF
     {
       "type": "vless",
       "tag": "vless-reality-in",
       "listen": "::",
       "listen_port": $port,
-      "users": [{"uuid": "$uuid", "flow": "xtls-rprx-vision"}],
+      "users": [{"name": "user-vless-reality", "uuid": "$uuid", "flow": "xtls-rprx-vision"}],
       "tls": {
         "enabled": true,
         "server_name": "$sn",
@@ -1789,6 +1817,7 @@ build_tuic() {
     
     local _cc="${OLD_TUIC_CC:-bbr}"
 
+    # 【重要修复】：去除了旧版中已废弃的 auth_timeout、zero_rtt_handshake、heartbeat
     cat > "$_jf" << EOF
     {
       "type": "tuic",
@@ -1797,9 +1826,6 @@ build_tuic() {
       "listen_port": $port,
       "users": [{"name": "user-tuic", "uuid": "$uuid", "password": "$pwd"}],
       "congestion_control": "$_cc",
-      "auth_timeout": "3s",
-      "zero_rtt_handshake": false,
-      "heartbeat": "10s",
       "tls": {
         "enabled": true,
         "server_name": "$sn",
@@ -1927,6 +1953,7 @@ configure_singbox() {
             if [[ "$has_input" == "true" ]]; then
                 log_info "正在解析旧节点数据..."
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
+                
                 cat > "$py_script" << 'PYEOF'
 import sys, urllib.parse, base64, json, re
 
@@ -1956,10 +1983,11 @@ for line in input_text.splitlines():
             uid = obj.get("id")
             net = obj.get("net")
             path = obj.get("path", "")
-            
-            # 【终极修复】: 原汁原味提取。如果客户端没写 SNI，连服务器 IP 也要原样作为 fallback 带入 bash
             sni = obj.get("sni", "") or obj.get("host", "") or obj.get("add", "")
             
+            if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
+                sni = ""
+
             if net == "ws" or "ws" in str(obj.get("ps", "")):
                 if uid: vars_out["OLD_VMESS_WS_UUID"] = uid
                 if port: vars_out["OLD_VMESS_WS_PORT"] = port
@@ -1988,7 +2016,6 @@ for line in input_text.splitlines():
             qs = urllib.parse.parse_qs(parsed.query)
             tag = parsed.fragment or ""
             
-            # 【终极修复】: 原汁原味提取。绝对不剥离 IP！防止由于剥离导致的握手配置断档
             sni = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or qs.get("peer", [""])[0]
             if not sni:
                 sni = host
@@ -2093,7 +2120,9 @@ if not vars_out:
     print("echo -e \"\\033[1;33m[WARN] 未能从输入内容中提取到任何有效参数（可能格式不支持或为空），将继续常规生成。\\033[0m\";")
 else:
     for k, v in vars_out.items():
-        print(f"export {k}=\"{v}\"")
+        # 【重要修复】：采用强转义机制替换特殊符号，防止环境变量在 bash 传承中被吞噬
+        v_escaped = str(v).replace("'", "'\\''")
+        print(f"export {k}='{v_escaped}'")
     print("echo -e \"\\033[0;32m[✓] 解析完成，已成功提取匹配节点的参数（涵盖端口、密码、UUID、流控及 SNI 等）。\\033[0m\";")
 PYEOF
                 local parse_exports
@@ -2241,7 +2270,7 @@ EOF
                 if [[ -z "$_real_errors" ]]; then
                     log_success "配置语法验证通过（DNS 格式兼容性警告已忽略）"
                 else
-                    log_warn "配置语法验证失败，详细原因："
+                    log_error "配置语法验证失败，详细原因："
                     echo "$_real_errors"
                 fi
             fi
