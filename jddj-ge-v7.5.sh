@@ -1,8 +1,13 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.4 (优化版)
+#   版本号：jddj-ge-v7.5 (优化版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
+#
+#   [v7.5 优化内容]
+#   优化1: 彻底移除配置 sing-box 时对“旧数据”和“本地订阅文件”的判断分支，
+#          任何时候进入 4 都会固定且明确地提示是否导入旧节点链接，
+#          完美解决了退出重进后提示发生变化或跳过提示的问题。
 # ================================================================
 
 # ================================================================
@@ -22,7 +27,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="jddj-ge-v7.4"
+SCRIPT_VERSION="jddj-ge-v7.5"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -1859,50 +1864,18 @@ configure_singbox() {
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
-        local has_old_data=false
-        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
-        
-        local has_local_sub=false
-        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
-
         local import_choice=""
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
 
-        # 核心修复：无条件前置上下文提示语，统一交互体验
         echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
-
-        if [[ "$has_old_data" == "true" ]]; then
-            echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
-            echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
-            echo -e "  2) 保持现有旧节点数据，直接进入配置 [默认]"
-            read -rp "请选择 (1-2, 默认 2): " import_choice
-            import_choice=${import_choice:-2}
-            if [[ "$import_choice" == "1" ]]; then
-                need_parse=true
-            fi
-        elif [[ "$has_local_sub" == "true" ]]; then
-            echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
-            echo -e "  1) 自动读取并导入本地旧节点数据 [默认]"
-            echo -e "  2) 手动粘贴导入其他旧节点链接"
-            echo -e "  3) 否，生成全新配置 (随机生成)"
-            read -rp "请选择 (1-3, 默认 1): " import_choice
-            import_choice=${import_choice:-1}
-            if [[ "$import_choice" == "1" ]]; then
-                cat /etc/sing-box/subscription.txt > "$links_file"
-                need_parse=true
-            elif [[ "$import_choice" == "2" ]]; then
-                need_parse=true
-            fi
-        else
-            # 取消了原有的提示语，因为已经提取到了最上方
-            echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
-            echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
-            read -rp "请选择 (1-2, 默认 2): " import_choice
-            import_choice=${import_choice:-2}
-            if [[ "$import_choice" == "1" ]]; then
-                need_parse=true
-            fi
+        echo -e "  1) 是，导入旧节点链接"
+        echo -e "  2) 否，生成全新配置 [默认]"
+        read -rp "请选择 (1-2, 默认 2): " import_choice
+        import_choice=${import_choice:-2}
+        
+        if [[ "$import_choice" == "1" ]]; then
+            need_parse=true
         fi
 
         if [[ "$need_parse" == "true" ]]; then
@@ -1919,7 +1892,6 @@ configure_singbox() {
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
                 
                 cat > "$py_script" << 'PYEOF'
-# ... [保留原有的 Python 解析代码完全不变] ...
 import sys, urllib.parse, base64, json, re
 
 input_text = sys.stdin.read().strip()
@@ -2129,7 +2101,6 @@ PYEOF
         fi
         rm -f "$links_file"
 
-        # ... [后续协议选择循环保持原样完全不变] ...
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
         echo "   1)  VLESS — TCP / XTLS-Vision"
