@@ -1,15 +1,8 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.5 (优化版)
+#   版本号：jddj-ge-v7.5 (智能状态保留优化版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
-#
-#   [v7.5 优化内容]
-#   优化1: 彻底移除配置 sing-box 时对“旧数据”和“本地订阅文件”的判断分支，
-#          任何时候进入 4 都会固定且明确地提示是否导入旧节点链接，
-#          完美解决了退出重进后提示发生变化或跳过提示的问题。
-# ================================================================
-
 # ================================================================
 
 # 遇到错误立即退出
@@ -1177,7 +1170,7 @@ build_vless_reality() {
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
         privkey="$OLD_VLESS_REALITY_PK"
         pubkey="$OLD_VLESS_REALITY_PBK"
-        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功 100% 还原 REALITY 密钥对！${NC}"
+        echo -e "  ${GREEN}★ 检测到旧节点/本地配置中存有 REALITY 密钥对，成功还原！${NC}"
     else
         # 尝试从本地已存在的 config 中读取 (用于无导入直接重装等情况)
         if [[ -f /etc/sing-box/config.json ]]; then
@@ -1859,23 +1852,205 @@ configure_singbox() {
         elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
     fi
 
+    # ====================================================================
+    # 核心优化：退出脚本后，自动通过逆向解析本地 config.json 恢复环境变量！
+    # ====================================================================
+    if [[ -f "/etc/sing-box/config.json" ]]; then
+        # 仅在未读取过数据时提取，防止覆盖当前会话中的手动输入
+        if [[ -z "$OLD_VLESS_TCP_PORT" && -z "$OLD_VLESS_REALITY_UUID" && -z "$OLD_TUIC_PORT" && -z "$OLD_HY2_PORT" && -z "$OLD_VMESS_WS_PORT" && -z "$OLD_TROJAN_TCP_PORT" && -z "$OLD_SS256_PORT" && -z "$OLD_SS_PORT" ]]; then
+            local py_script_local=$(mktemp /tmp/parse_local.XXXXXX.py)
+            cat > "$py_script_local" << 'PYEOF'
+import json, re, sys
+try:
+    with open("/etc/sing-box/config.json", "r") as f:
+        raw = f.read()
+    clean = re.sub(r'(?<![:/])//[^\n]*', '', raw)
+    config = json.loads(clean)
+except Exception:
+    sys.exit(0)
+
+vars_out = {}
+inbounds = config.get("inbounds", [])
+for ib in inbounds:
+    t = ib.get("type")
+    tag = ib.get("tag", "")
+    port = ib.get("listen_port")
+    tls = ib.get("tls", {})
+    sni = tls.get("server_name", "")
+    users = ib.get("users", [])
+    
+    pk_match = re.search(r'vless-reality-in-([A-Za-z0-9_-]+)', tag)
+    if pk_match:
+        vars_out["OLD_VLESS_REALITY_PK"] = pk_match.group(1)
+        
+    if t == "vless":
+        uuid = users[0].get("uuid", "") if users else ""
+        flow = users[0].get("flow", "") if users else ""
+        if tls.get("reality", {}).get("enabled"):
+            if port: vars_out["OLD_VLESS_REALITY_PORT"] = port
+            if uuid: vars_out["OLD_VLESS_REALITY_UUID"] = uuid
+            if sni: vars_out["OLD_VLESS_REALITY_SNI"] = sni
+            sid = tls.get("reality", {}).get("short_id", [""])[0]
+            if sid: vars_out["OLD_VLESS_REALITY_SID"] = sid
+            try:
+                with open("/etc/sing-box/reality_meta.conf") as mf:
+                    for line in mf:
+                        if line.startswith(f"{port}:"):
+                            vars_out["OLD_VLESS_REALITY_PBK"] = line.strip().split(":", 1)[1]
+                            break
+            except:
+                pass
+        elif ib.get("transport", {}).get("type") == "grpc":
+            if port: vars_out["OLD_VLESS_GRPC_PORT"] = port
+            if uuid: vars_out["OLD_VLESS_GRPC_UUID"] = uuid
+            if sni: vars_out["OLD_VLESS_GRPC_SNI"] = sni
+            svc = ib.get("transport", {}).get("service_name", "")
+            if svc: vars_out["OLD_VLESS_GRPC_SVC"] = svc
+        elif ib.get("transport", {}).get("type") == "ws":
+            if port: vars_out["OLD_VLESS_WS_PORT"] = port
+            if uuid: vars_out["OLD_VLESS_WS_UUID"] = uuid
+            if sni: vars_out["OLD_VLESS_WS_SNI"] = sni
+            path = ib.get("transport", {}).get("path", "")
+            if path: vars_out["OLD_VLESS_WS_PATH"] = path
+        else:
+            if port: vars_out["OLD_VLESS_TCP_PORT"] = port
+            if uuid: vars_out["OLD_VLESS_TCP_UUID"] = uuid
+            if sni: vars_out["OLD_VLESS_TCP_SNI"] = sni
+            if flow: vars_out["OLD_VLESS_TCP_FLOW"] = flow
+    elif t == "vmess":
+        uuid = users[0].get("uuid", "") if users else ""
+        if ib.get("transport", {}).get("type") == "ws":
+            if port: vars_out["OLD_VMESS_WS_PORT"] = port
+            if uuid: vars_out["OLD_VMESS_WS_UUID"] = uuid
+            if sni: vars_out["OLD_VMESS_WS_SNI"] = sni
+            path = ib.get("transport", {}).get("path", "")
+            if path: vars_out["OLD_VMESS_WS_PATH"] = path
+        else:
+            if port: vars_out["OLD_VMESS_TCP_PORT"] = port
+            if uuid: vars_out["OLD_VMESS_TCP_UUID"] = uuid
+            if sni: vars_out["OLD_VMESS_TCP_SNI"] = sni
+    elif t == "trojan":
+        pwd = users[0].get("password", "") if users else ""
+        if ib.get("transport", {}).get("type") == "ws":
+            if port: vars_out["OLD_TROJAN_WS_PORT"] = port
+            if pwd: vars_out["OLD_TROJAN_WS_PWD"] = pwd
+            if sni: vars_out["OLD_TROJAN_WS_SNI"] = sni
+            path = ib.get("transport", {}).get("path", "")
+            if path: vars_out["OLD_TROJAN_WS_PATH"] = path
+        else:
+            if port: vars_out["OLD_TROJAN_TCP_PORT"] = port
+            if pwd: vars_out["OLD_TROJAN_TCP_PWD"] = pwd
+            if sni: vars_out["OLD_TROJAN_TCP_SNI"] = sni
+    elif t == "shadowsocks":
+        method = ib.get("method", "")
+        pwd = ib.get("password", "")
+        if "2022" in method:
+            upwd = users[0].get("password", "") if users else ""
+            if "128" in method:
+                if port: vars_out["OLD_SS128_PORT"] = port
+                if method: vars_out["OLD_SS128_METHOD"] = method
+                if pwd: vars_out["OLD_SS128_SPWD"] = pwd
+                if upwd: vars_out["OLD_SS128_UPWD"] = upwd
+            else:
+                if port: vars_out["OLD_SS256_PORT"] = port
+                if method: vars_out["OLD_SS256_METHOD"] = method
+                if pwd: vars_out["OLD_SS256_SPWD"] = pwd
+                if upwd: vars_out["OLD_SS256_UPWD"] = upwd
+        else:
+            if port: vars_out["OLD_SS_PORT"] = port
+            if method: vars_out["OLD_SS_METHOD"] = method
+            if pwd: vars_out["OLD_SS_PWD"] = pwd
+    elif t == "hysteria2":
+        pwd = users[0].get("password", "") if users else ""
+        obfs = ib.get("obfs", {})
+        if port: vars_out["OLD_HY2_PORT"] = port
+        if pwd: vars_out["OLD_HY2_PWD"] = pwd
+        if sni: vars_out["OLD_HY2_SNI"] = sni
+        if obfs.get("type"): vars_out["OLD_HY2_OBFS"] = obfs.get("type")
+        if obfs.get("password"): vars_out["OLD_HY2_OBFSPWD"] = obfs.get("password")
+    elif t == "tuic":
+        uuid = users[0].get("uuid", "") if users else ""
+        pwd = users[0].get("password", "") if users else ""
+        if port: vars_out["OLD_TUIC_PORT"] = port
+        if uuid: vars_out["OLD_TUIC_UUID"] = uuid
+        if pwd: vars_out["OLD_TUIC_PWD"] = pwd
+        if sni: vars_out["OLD_TUIC_SNI"] = sni
+        cc = ib.get("congestion_control", "")
+        if cc: vars_out["OLD_TUIC_CC"] = cc
+    elif t == "anytls":
+        pwd = users[0].get("password", "") if users else ""
+        if port: vars_out["OLD_ANYTLS_PORT"] = port
+        if pwd: vars_out["OLD_ANYTLS_PWD"] = pwd
+        if sni: vars_out["OLD_ANYTLS_SNI"] = sni
+    elif t == "naive":
+        uname = users[0].get("username", "") if users else ""
+        pwd = users[0].get("password", "") if users else ""
+        if port: vars_out["OLD_NAIVE_PORT"] = port
+        if uname: vars_out["OLD_NAIVE_UNAME"] = uname
+        if pwd: vars_out["OLD_NAIVE_PWD"] = pwd
+        if sni: vars_out["OLD_NAIVE_SNI"] = sni
+
+if vars_out:
+    for k, v in vars_out.items():
+        v_escaped = str(v).replace("'", "'\\''")
+        print(f"export {k}='{v_escaped}'")
+PYEOF
+            local local_exports=$(python3 "$py_script_local")
+            eval "$local_exports"
+            rm -f "$py_script_local"
+        fi
+    fi
+
     while true; do
         clear
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
+        local has_old_data=false
+        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" || -n "$OLD_SS_PORT" || -n "$OLD_ANYTLS_PORT" || -n "$OLD_NAIVE_PORT" ]] && has_old_data=true
+        
+        local has_local_sub=false
+        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
+
         local import_choice=""
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
 
-        echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
-        echo -e "  1) 是，导入旧节点链接"
-        echo -e "  2) 否，生成全新配置 [默认]"
-        read -rp "请选择 (1-2, 默认 2): " import_choice
-        import_choice=${import_choice:-2}
-        
-        if [[ "$import_choice" == "1" ]]; then
-            need_parse=true
+        if [[ "$has_old_data" == "true" ]]; then
+            echo -e "${GREEN}★ 系统检测到已载入旧节点参数（来源: 本地已存在的 config.json 或 会话缓存）！${NC}"
+            echo -e "  1) 沿用已有配置参数直接进入配置菜单 [默认]"
+            echo -e "  2) 手动导入其他旧节点链接 (粘贴新链接以覆盖现有数据)"
+            echo -e "  3) 忽略旧参数，生成全新配置 (清空提取参数，全部重新随机生成)"
+            read -rp "请选择 (1-3, 默认 1): " import_choice
+            import_choice=${import_choice:-1}
+            if [[ "$import_choice" == "2" ]]; then
+                need_parse=true
+            elif [[ "$import_choice" == "3" ]]; then
+                unset $(env | awk -F= '/^OLD_/ {print $1}') 2>/dev/null || true
+                has_old_data=false
+            fi
+        elif [[ "$has_local_sub" == "true" ]]; then
+            echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
+            echo -e "  1) 自动读取并导入本地旧节点数据 [默认]"
+            echo -e "  2) 手动粘贴导入其他旧节点链接"
+            echo -e "  3) 否，生成全新配置 (随机生成)"
+            read -rp "请选择 (1-3, 默认 1): " import_choice
+            import_choice=${import_choice:-1}
+            if [[ "$import_choice" == "1" ]]; then
+                cat /etc/sing-box/subscription.txt > "$links_file"
+                need_parse=true
+            elif [[ "$import_choice" == "2" ]]; then
+                need_parse=true
+            fi
+        else
+            echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
+            echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
+            echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
+            read -rp "请选择 (1-2, 默认 2): " import_choice
+            import_choice=${import_choice:-2}
+            if [[ "$import_choice" == "1" ]]; then
+                need_parse=true
+            fi
         fi
 
         if [[ "$need_parse" == "true" ]]; then
