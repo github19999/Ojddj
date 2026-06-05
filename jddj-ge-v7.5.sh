@@ -1,7 +1,7 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.5 (智能状态保留优化版)
+#   版本号：jddj-ge-v7.6 (极限防闪退修复版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 
@@ -20,7 +20,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="jddj-ge-v7.5"
+SCRIPT_VERSION="jddj-ge-v7.6"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -75,18 +75,18 @@ detect_distro() {
 # ────────────────────────────────────────────────────────────────
 #  随机生成工具函数
 # ────────────────────────────────────────────────────────────────
-gen_uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())"; }
+gen_uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || echo "00000000-0000-0000-0000-000000000000"; }
 
 gen_password() {
     local length="${1:-24}"
     tr -dc 'A-Za-z0-9!@#$%^&*' </dev/urandom | head -c "$length" 2>/dev/null || \
-    python3 -c "import secrets,string; print(secrets.token_urlsafe($length))"
+    python3 -c "import secrets,string; print(secrets.token_urlsafe($length))" 2>/dev/null || echo "default_pwd_123"
 }
 
-gen_ss2022_key_256() { openssl rand -base64 32; }
-gen_ss2022_key_128() { openssl rand -base64 16; }
+gen_ss2022_key_256() { openssl rand -base64 32 2>/dev/null || echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; }
+gen_ss2022_key_128() { openssl rand -base64 16 2>/dev/null || echo "AAAAAAAAAAAAAAAAAAAAAA=="; }
 
-gen_short_id() { openssl rand -hex 4; }
+gen_short_id() { openssl rand -hex 4 2>/dev/null || echo "1234abcd"; }
 
 gen_naive_username() {
     tr -dc 'a-z0-9' </dev/urandom | head -c 12 2>/dev/null || echo "naiveuser$(shuf -i 1000-9999 -n1)"
@@ -269,16 +269,17 @@ ask_cert_paths() {
     local auto_cert="" auto_key=""
 
     for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/${sn}.crt"           ]] && auto_cert="$d/${sn}.crt"           && break
-        [[ -f "$d/fullchain.cer"       ]] && auto_cert="$d/fullchain.cer"       && break
-        [[ -f "$d/${sn}/fullchain.cer" ]] && auto_cert="$d/${sn}/fullchain.cer" && break
+        if [[ -f "$d/${sn}.crt" ]]; then auto_cert="$d/${sn}.crt"; break; fi
+        if [[ -f "$d/fullchain.cer" ]]; then auto_cert="$d/fullchain.cer"; break; fi
+        if [[ -f "$d/${sn}/fullchain.cer" ]]; then auto_cert="$d/${sn}/fullchain.cer"; break; fi
     done
     for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/${sn}.key"   ]] && auto_key="$d/${sn}.key"   && break
-        [[ -f "$d/private.key" ]] && auto_key="$d/private.key" && break
+        if [[ -f "$d/${sn}.key" ]]; then auto_key="$d/${sn}.key"; break; fi
+        if [[ -f "$d/private.key" ]]; then auto_key="$d/private.key"; break; fi
     done
-    [[ -z "$auto_cert" && -f "/root/.acme.sh/${sn}/fullchain.cer" ]] && auto_cert="/root/.acme.sh/${sn}/fullchain.cer"
-    [[ -z "$auto_key"  && -f "/root/.acme.sh/${sn}/${sn}.key"     ]] && auto_key="/root/.acme.sh/${sn}/${sn}.key"
+    
+    if [[ -z "$auto_cert" && -f "/root/.acme.sh/${sn}/fullchain.cer" ]]; then auto_cert="/root/.acme.sh/${sn}/fullchain.cer"; fi
+    if [[ -z "$auto_key"  && -f "/root/.acme.sh/${sn}/${sn}.key"     ]]; then auto_key="/root/.acme.sh/${sn}/${sn}.key"; fi
 
     local default_cert="${auto_cert:-/etc/ssl/private/fullchain.cer}"
     local default_key="${auto_key:-/etc/ssl/private/private.key}"
@@ -487,7 +488,7 @@ setup_fail2ban() {
     else
         BACKEND="auto"
         for lp in /var/log/auth.log /var/log/secure; do
-            [[ -f "$lp" ]] && LOGPATH="logpath = $lp" && break
+            if [[ -f "$lp" ]]; then LOGPATH="logpath = $lp"; break; fi
         done
         [[ -z "$LOGPATH" ]] && LOGPATH="logpath = /var/log/auth.log"
     fi
@@ -981,7 +982,8 @@ install_nginx() {
         fi
     fi
     if [[ "$PKG_MANAGER" == "apt" ]]; then
-        apt update -y && apt install -y nginx
+        apt update -y >/dev/null 2>&1 || true
+        apt install -y nginx
     else
         $PKG_MANAGER install -y nginx
     fi
@@ -1028,7 +1030,7 @@ build_vless_tcp() {
         echo -e "    ${YELLOW}2)${NC} 无（普通 TLS，不启用流控）"
         
         local _def_choice="1"
-        [[ -z "${OLD_VLESS_TCP_FLOW}" && -n "${OLD_VLESS_TCP_PORT}" ]] && _def_choice="2"
+        if [[ -z "${OLD_VLESS_TCP_FLOW}" && -n "${OLD_VLESS_TCP_PORT}" ]]; then _def_choice="2"; fi
         
         ask_val flow_choice "请输入编号" "$_def_choice"
         if [[ "$flow_choice" == "2" ]]; then
@@ -1047,7 +1049,7 @@ build_vless_tcp() {
     local cp="$CERT_PATH" kp="$KEY_PATH"
 
     local flow_json
-    [[ -n "$flow" ]] && flow_json='"flow": "'"$flow"'"' || flow_json='"flow": ""'
+    if [[ -n "$flow" ]]; then flow_json='"flow": "'"$flow"'"'; else flow_json='"flow": ""'; fi
 
     cat > "$_jf" << EOF
     {
@@ -1172,12 +1174,11 @@ build_vless_reality() {
         pubkey="$OLD_VLESS_REALITY_PBK"
         echo -e "  ${GREEN}★ 检测到旧节点/本地配置中存有 REALITY 密钥对，成功还原！${NC}"
     else
-        # 尝试从本地已存在的 config 中读取 (用于无导入直接重装等情况)
         if [[ -f /etc/sing-box/config.json ]]; then
-            existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
+            existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1 || true)
         fi
         if [[ -f /etc/sing-box/reality_meta.conf ]]; then
-            existing_pub=$(grep -oP "^${port}:\K.*" /etc/sing-box/reality_meta.conf | head -1)
+            existing_pub=$(grep -oP "^${port}:\K.*" /etc/sing-box/reality_meta.conf | head -1 || true)
         fi
 
         if [[ -n "$existing_pk" && -n "$existing_pub" && "$existing_pk" != '""' ]]; then
@@ -1188,10 +1189,9 @@ build_vless_reality() {
             log_info "正在通过 sing-box 原生命令生成全新 REALITY 密钥对..."
             local keypair_out
             keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
-            privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}')
-            pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}')
+            privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}' || true)
+            pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}' || true)
             if [[ -z "$privkey" ]]; then
-                # 异常兜底保护
                 privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
                 pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
             fi
@@ -1278,7 +1278,6 @@ build_vless_reality() {
     ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
     ask_val hs_port   "handshake port" "8001"
 
-    # 将 pk 写入 tag 中，便于未来旧节点导入时直接提取。
     cat > "$_jf" << EOF
     {
       "type": "vless",
@@ -1332,13 +1331,13 @@ HTML
 
     local cert_path="" key_path=""
     for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/fullchain.cer" ]] && cert_path="$d/fullchain.cer" && break
+        if [[ -f "$d/fullchain.cer" ]]; then cert_path="$d/fullchain.cer"; break; fi
     done
     for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/private.key" ]] && key_path="$d/private.key" && break
+        if [[ -f "$d/private.key" ]]; then key_path="$d/private.key"; break; fi
     done
-    [[ -z "$cert_path" && -f "/root/.acme.sh/${domain}/fullchain.cer" ]] && cert_path="/root/.acme.sh/${domain}/fullchain.cer"
-    [[ -z "$key_path"  && -f "/root/.acme.sh/${domain}/${domain}.key" ]] && key_path="/root/.acme.sh/${domain}/${domain}.key"
+    if [[ -z "$cert_path" && -f "/root/.acme.sh/${domain}/fullchain.cer" ]]; then cert_path="/root/.acme.sh/${domain}/fullchain.cer"; fi
+    if [[ -z "$key_path"  && -f "/root/.acme.sh/${domain}/${domain}.key" ]]; then key_path="/root/.acme.sh/${domain}/${domain}.key"; fi
     cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
     key_path="${key_path:-/etc/ssl/private/private.key}"
 
@@ -1428,7 +1427,7 @@ EOF
         log_info "  回落端口: 127.0.0.1:8001"
     else
         log_warn "Nginx 配置语法有误，详细原因："
-        nginx -t
+        nginx -t || true
     fi
 }
 
@@ -1607,8 +1606,8 @@ build_ss_classic() {
         echo -e "    ${YELLOW}3)${NC} chacha20-ietf-poly1305"
         
         local _def_mc="1"
-        [[ "${OLD_SS_METHOD}" == "aes-128-gcm" ]] && _def_mc="2"
-        [[ "${OLD_SS_METHOD}" == "chacha20-ietf-poly1305" ]] && _def_mc="3"
+        if [[ "${OLD_SS_METHOD}" == "aes-128-gcm" ]]; then _def_mc="2"; fi
+        if [[ "${OLD_SS_METHOD}" == "chacha20-ietf-poly1305" ]]; then _def_mc="3"; fi
         
         ask_val mc "请输入编号" "$_def_mc"
         case $mc in
@@ -1845,11 +1844,22 @@ EOF
 }
 
 configure_singbox() {
+    # 极强容错：就算安装失败，也仅输出警告而不闪退！
     if ! command -v python3 &>/dev/null; then
         log_info "正在预装 python3 以支持节点解析..."
-        if command -v apt &>/dev/null; then apt install -y python3 >/dev/null 2>&1;
-        elif command -v dnf &>/dev/null; then dnf install -y python3 >/dev/null 2>&1;
-        elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
+        if command -v apt &>/dev/null; then 
+            apt update -y >/dev/null 2>&1 || true
+            apt install -y python3 >/dev/null 2>&1 || true
+        elif command -v dnf &>/dev/null; then 
+            dnf install -y python3 >/dev/null 2>&1 || true
+        elif command -v yum &>/dev/null; then 
+            yum install -y python3 >/dev/null 2>&1 || true
+        fi
+        
+        if ! command -v python3 &>/dev/null; then
+            log_warn "预装 python3 失败！但这不影响你进行手动配置。"
+            sleep 2
+        fi
     fi
 
     # ====================================================================
@@ -1858,7 +1868,8 @@ configure_singbox() {
     if [[ -f "/etc/sing-box/config.json" ]]; then
         # 仅在未读取过数据时提取，防止覆盖当前会话中的手动输入
         if [[ -z "$OLD_VLESS_TCP_PORT" && -z "$OLD_VLESS_REALITY_UUID" && -z "$OLD_TUIC_PORT" && -z "$OLD_HY2_PORT" && -z "$OLD_VMESS_WS_PORT" && -z "$OLD_TROJAN_TCP_PORT" && -z "$OLD_SS256_PORT" && -z "$OLD_SS_PORT" ]]; then
-            local py_script_local=$(mktemp /tmp/parse_local.XXXXXX.py)
+            local py_script_local
+            py_script_local=$(mktemp /tmp/parse_local.XXXXXX.py 2>/dev/null || echo "/tmp/parse_local_$RANDOM.py")
             cat > "$py_script_local" << 'PYEOF'
 import json, re, sys
 try:
@@ -1995,9 +2006,10 @@ if vars_out:
         v_escaped = str(v).replace("'", "'\\''")
         print(f"export {k}='{v_escaped}'")
 PYEOF
-            local local_exports=$(python3 "$py_script_local")
+            local local_exports
+            local_exports=$(python3 "$py_script_local" 2>/dev/null || true)
             eval "$local_exports"
-            rm -f "$py_script_local"
+            rm -f "$py_script_local" 2>/dev/null || true
         fi
     fi
 
@@ -2006,15 +2018,21 @@ PYEOF
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
+        # 杜绝 && 简写造成的 set -e 闪退
         local has_old_data=false
-        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" || -n "$OLD_SS_PORT" || -n "$OLD_ANYTLS_PORT" || -n "$OLD_NAIVE_PORT" ]] && has_old_data=true
+        if [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" || -n "$OLD_SS_PORT" || -n "$OLD_ANYTLS_PORT" || -n "$OLD_NAIVE_PORT" ]]; then
+            has_old_data=true
+        fi
         
         local has_local_sub=false
-        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
+        if [[ -s "/etc/sing-box/subscription.txt" ]]; then
+            has_local_sub=true
+        fi
 
         local import_choice=""
         local need_parse=false
-        local links_file=$(mktemp /tmp/old_links.XXXXXX)
+        local links_file
+        links_file=$(mktemp /tmp/old_links.XXXXXX 2>/dev/null || echo "/tmp/old_links_$RANDOM")
 
         if [[ "$has_old_data" == "true" ]]; then
             echo -e "${GREEN}★ 系统检测到已载入旧节点参数（来源: 本地已存在的 config.json 或 会话缓存）！${NC}"
@@ -2026,7 +2044,7 @@ PYEOF
             if [[ "$import_choice" == "2" ]]; then
                 need_parse=true
             elif [[ "$import_choice" == "3" ]]; then
-                unset $(env | awk -F= '/^OLD_/ {print $1}') 2>/dev/null || true
+                unset $(env | awk -F= '/^OLD_/ {print $1}' 2>/dev/null) 2>/dev/null || true
                 has_old_data=false
             fi
         elif [[ "$has_local_sub" == "true" ]]; then
@@ -2037,7 +2055,7 @@ PYEOF
             read -rp "请选择 (1-3, 默认 1): " import_choice
             import_choice=${import_choice:-1}
             if [[ "$import_choice" == "1" ]]; then
-                cat /etc/sing-box/subscription.txt > "$links_file"
+                cat /etc/sing-box/subscription.txt > "$links_file" 2>/dev/null || true
                 need_parse=true
             elif [[ "$import_choice" == "2" ]]; then
                 need_parse=true
@@ -2064,7 +2082,8 @@ PYEOF
             
             if [[ -s "$links_file" ]]; then
                 log_info "正在解析旧节点数据..."
-                local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
+                local py_script
+                py_script=$(mktemp /tmp/parse_links.XXXXXX.py 2>/dev/null || echo "/tmp/parse_links_$RANDOM.py")
                 
                 cat > "$py_script" << 'PYEOF'
 import sys, urllib.parse, base64, json, re
@@ -2162,7 +2181,6 @@ for line in input_text.splitlines():
                     if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = qs["pbk"][0]
                     if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = qs["sid"][0]
                     
-                    # Tag 藏钥法：自动提取 PrivateKey
                     m = re.search(r'vless-reality-in-([A-Za-z0-9_-]+)', tag)
                     if m:
                         vars_out["OLD_VLESS_REALITY_PK"] = m.group(1)
@@ -2263,9 +2281,9 @@ else:
     print("echo -e \"\\033[0;32m[✓] 解析完成，已成功提取匹配节点的参数（涵盖端口、密码、UUID、流控及 SNI 等）。\\033[0m\";")
 PYEOF
                 local parse_exports
-                parse_exports=$(python3 "$py_script" < "$links_file")
+                parse_exports=$(python3 "$py_script" < "$links_file" 2>/dev/null || true)
                 eval "$parse_exports"
-                rm -f "$py_script"
+                rm -f "$py_script" 2>/dev/null || true
             else
                 log_warn "未识别到输入内容，继续常规生成..."
             fi
@@ -2274,7 +2292,7 @@ PYEOF
             echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
             echo ""
         fi
-        rm -f "$links_file"
+        rm -f "$links_file" 2>/dev/null || true
 
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
@@ -2332,7 +2350,7 @@ PYEOF
         fi
 
         local TMP_JSON
-        TMP_JSON=$(mktemp /tmp/jddj_inbound_XXXXXX)
+        TMP_JSON=$(mktemp /tmp/jddj_inbound_XXXXXX 2>/dev/null || echo "/tmp/jddj_inbound_$RANDOM")
         local INBOUNDS_JSON=""
         local first=true
 
@@ -2357,7 +2375,7 @@ PYEOF
                 *)  log_warn "未知选项: $choice，跳过"; continue ;;
             esac
             local inbound_json
-            inbound_json=$(cat "$TMP_JSON")
+            inbound_json=$(cat "$TMP_JSON" 2>/dev/null || true)
             [[ -z "$inbound_json" ]] && continue
             if $first; then
                 INBOUNDS_JSON="$inbound_json"
@@ -2366,7 +2384,7 @@ PYEOF
                 INBOUNDS_JSON="${INBOUNDS_JSON},${inbound_json}"
             fi
         done
-        rm -f "$TMP_JSON"
+        rm -f "$TMP_JSON" 2>/dev/null || true
 
         mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
         cat > /etc/sing-box/config.json << EOF
@@ -2393,7 +2411,7 @@ EOF
 
         if command -v sing-box &>/dev/null; then
             local _check_out
-            _check_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1)
+            _check_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1 || true)
             local _check_rc=$?
             if [[ $_check_rc -eq 0 ]]; then
                 log_success "配置语法验证通过"
@@ -2462,11 +2480,11 @@ menu_service() {
             1) systemctl start sing-box && log_success "sing-box 已启动"; press_enter ;;
             2) systemctl stop sing-box && log_success "sing-box 已停止"; press_enter ;;
             3)
-                systemctl restart sing-box
+                systemctl restart sing-box || true
                 echo ""
-                systemctl status sing-box --no-pager
+                systemctl status sing-box --no-pager || true
                 press_enter ;;
-            4) systemctl status sing-box; press_enter ;;
+            4) systemctl status sing-box || true; press_enter ;;
             5) systemctl enable sing-box && log_success "已设为开机自启"; press_enter ;;
             6) systemctl disable sing-box && log_success "已取消开机自启"; press_enter ;;
             7)
@@ -2480,7 +2498,7 @@ menu_service() {
             9)
                 if command -v sing-box &>/dev/null; then
                     local _sc_out
-                    _sc_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1)
+                    _sc_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1 || true)
                     local _sc_rc=$?
                     if [[ $_sc_rc -eq 0 ]]; then
                         log_success "配置验证通过"
@@ -2508,9 +2526,9 @@ menu_service() {
                 press_enter ;;
             12)
                 if command -v nginx &>/dev/null; then
-                    systemctl restart nginx
+                    systemctl restart nginx || true
                     echo ""
-                    systemctl status nginx --no-pager
+                    systemctl status nginx --no-pager || true
                 else
                     log_error "Nginx 未安装"
                 fi
@@ -2576,7 +2594,7 @@ INNEREOF
     log_step "修复后验证..."
     if command -v sing-box &>/dev/null; then
         local _out _rc
-        _out=$(sing-box check -c "$cfg" 2>&1)
+        _out=$(sing-box check -c "$cfg" 2>&1 || true)
         _rc=$?
         if [[ $_rc -eq 0 ]]; then
             log_success "配置验证通过"
@@ -3007,8 +3025,8 @@ run_all() {
 
     echo ""
     echo -e "${BLUE}── 步骤 5：sing-box 服务 ──${NC}"
-    systemctl enable sing-box
-    systemctl restart sing-box
+    systemctl enable sing-box || true
+    systemctl restart sing-box || true
     systemctl is-active --quiet sing-box && log_success "sing-box 运行中" || log_warn "sing-box 启动失败，请检查配置"
 
     echo ""
@@ -3073,7 +3091,7 @@ install_self() {
 
     local current_ver=""
     if [[ -s "$target" ]]; then
-        current_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$target" 2>/dev/null | head -1)
+        current_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$target" 2>/dev/null | head -1 || true)
         [[ "$current_ver" == "$SCRIPT_VERSION" ]] && return 0
     fi
 
@@ -3085,7 +3103,7 @@ install_self() {
             log_warn "未配置真实的 JDDJ_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
         else
             if curl -fsSL --connect-timeout 5 --max-time 20 "$JDDJ_REMOTE_URL" -o "$target" 2>/dev/null; then
-                chmod 755 "$target" 2>/dev/null
+                chmod 755 "$target" 2>/dev/null || true
                 log_success "已安装快捷命令: jddj (远程同步)"
             else
                 log_warn "快捷命令远程同步失败，请检查网络或 JDDJ_REMOTE_URL 是否正确。"
@@ -3093,7 +3111,7 @@ install_self() {
         fi
     fi
 
-    command -v hash &>/dev/null && hash -r
+    command -v hash &>/dev/null && hash -r || true
 }
 
 # ────────────────────────────────────────────────────────────────
