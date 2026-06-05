@@ -1,17 +1,11 @@
 #!/bin/bash
-# jddj-ge-v7.5
-# 优化内容：
-# 修复通过 jddj 重新进入主菜单后，
-# 再进入“4. 配置 sing-box”时，
-# “是否需要导入旧节点链接以保持配置参数不变”
-# 提示不显示的问题。
-# 现在无论首次运行、重新进入菜单、
-# Ctrl+C 后重新执行 jddj、
-# 或重复进入配置菜单，
-# 都会始终显示该导入提示。
 # ================================================================
 #   服务器一键管理脚本 (jddj)
 #   版本号：jddj-ge-v7.5 (优化版)
+#   优化内容：
+#   1. 移除了旧版的本地订阅文件和会话缓存自动检测逻辑。
+#   2. 确保任何时候进入“配置 sing-box”时，均固定显示“是否需要导入
+#      旧节点链接以保持配置参数不变”的基础交互选项。
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 
@@ -1869,12 +1863,6 @@ configure_singbox() {
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
-        local has_old_data=false
-        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
-        
-        local has_local_sub=false
-        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
-
         local import_choice=""
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
@@ -1882,51 +1870,11 @@ configure_singbox() {
         echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
         echo -e "  1) 是，导入旧节点链接"
         echo -e "  2) 否，生成全新配置 [默认]"
-        read -rp "请选择 (1-2, 默认 2): " base_choice
-        base_choice=${base_choice:-2}
-
-        if [[ "$base_choice" == "1" ]]; then
-            if [[ "$has_old_data" == "true" ]]; then
-                echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
-                echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
-                echo -e "  2) 保持现有旧节点数据，直接进入配置 [默认]"
-                read -rp "请选择 (1-2, 默认 2): " import_choice
-                import_choice=${import_choice:-2}
-                if [[ "$import_choice" == "1" ]]; then
-                    need_parse=true
-                fi
-            elif [[ "$has_local_sub" == "true" ]]; then
-                echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
-                echo -e "  1) 自动读取并导入本地旧节点数据 [默认]"
-                echo -e "  2) 手动粘贴导入其他旧节点链接"
-                read -rp "请选择 (1-2, 默认 1): " import_choice
-                import_choice=${import_choice:-1}
-                if [[ "$import_choice" == "1" ]]; then
-                    cat /etc/sing-box/subscription.txt > "$links_file"
-                    need_parse=true
-                elif [[ "$import_choice" == "2" ]]; then
-                    need_parse=true
-                fi
-            else
-                need_parse=true
-            fi
-        else
-            need_parse=false
-            unset OLD_VLESS_TCP_PORT OLD_VLESS_TCP_UUID OLD_VLESS_TCP_FLOW OLD_VLESS_TCP_SNI
-            unset OLD_VLESS_WS_PORT OLD_VLESS_WS_UUID OLD_VLESS_WS_PATH OLD_VLESS_WS_SNI
-            unset OLD_VLESS_GRPC_PORT OLD_VLESS_GRPC_UUID OLD_VLESS_GRPC_SVC OLD_VLESS_GRPC_SNI
-            unset OLD_VLESS_REALITY_PORT OLD_VLESS_REALITY_UUID OLD_VLESS_REALITY_SNI OLD_VLESS_REALITY_PBK OLD_VLESS_REALITY_SID OLD_VLESS_REALITY_PK
-            unset OLD_VMESS_TCP_PORT OLD_VMESS_TCP_UUID OLD_VMESS_TCP_SNI
-            unset OLD_VMESS_WS_PORT OLD_VMESS_WS_UUID OLD_VMESS_WS_PATH OLD_VMESS_WS_SNI
-            unset OLD_TROJAN_TCP_PORT OLD_TROJAN_TCP_PWD OLD_TROJAN_TCP_SNI
-            unset OLD_TROJAN_WS_PORT OLD_TROJAN_WS_PWD OLD_TROJAN_WS_PATH OLD_TROJAN_WS_SNI
-            unset OLD_SS_PORT OLD_SS_METHOD OLD_SS_PWD
-            unset OLD_SS256_PORT OLD_SS256_METHOD OLD_SS256_SPWD OLD_SS256_UPWD
-            unset OLD_SS128_PORT OLD_SS128_METHOD OLD_SS128_SPWD OLD_SS128_UPWD
-            unset OLD_HY2_PORT OLD_HY2_PWD OLD_HY2_OBFS OLD_HY2_OBFSPWD OLD_HY2_SNI
-            unset OLD_TUIC_PORT OLD_TUIC_UUID OLD_TUIC_PWD OLD_TUIC_CC OLD_TUIC_SNI
-            unset OLD_ANYTLS_PORT OLD_ANYTLS_PWD OLD_ANYTLS_SNI
-            unset OLD_NAIVE_PORT OLD_NAIVE_UNAME OLD_NAIVE_PWD OLD_NAIVE_SNI
+        read -rp "请选择 (1-2, 默认 2): " import_choice
+        import_choice=${import_choice:-2}
+        
+        if [[ "$import_choice" == "1" ]]; then
+            need_parse=true
         fi
 
         if [[ "$need_parse" == "true" ]]; then
