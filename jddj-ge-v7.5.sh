@@ -5,12 +5,12 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v7.5 优化版)】
-#   优化1：优化配置 sing-box 时的交互逻辑。去除了本地历史节点配置强制弹窗，
-#         当通过 jddj 重新进入主菜单并选择配置 sing-box 时，固定显示：
-#         “是否需要导入旧节点链接以保持配置参数不变？” 并提供干净的 1/2 选项。
+#   优化1：优化配置 sing-box 时的交互逻辑，取消复杂的自动判断，任何时候进入
+#         该选项均统一提示是否导入旧节点链接，以提供一致的操作预期。并在
+#         选择生成全新配置时清空环境变量缓存，确保全新生成逻辑正常。
 # ================================================================
 # 【往期核心优化回顾】
-#   v7.4：修复导入旧节点时特殊字符导致断层的 BUG；新增本地历史节点配置读取机制。
+#   v7.4：修复导入旧节点时特殊字符引发的提取截断BUG；增加自动识别本地订阅机制。
 #   v7.3：VLESS-REALITY 采纳“Tag 藏钥法”，完美实现 REALITY 节点的无损重装。
 # ================================================================
 
@@ -1175,13 +1175,11 @@ build_vless_reality() {
 
     local privkey pubkey existing_pk="" existing_pub=""
     
-    # 核心优化：利用 Tag 藏钥法进行数据还原
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
         privkey="$OLD_VLESS_REALITY_PK"
         pubkey="$OLD_VLESS_REALITY_PBK"
         echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功 100% 还原 REALITY 密钥对！${NC}"
     else
-        # 尝试从本地已存在的 config 中读取 (用于无导入直接重装等情况)
         if [[ -f /etc/sing-box/config.json ]]; then
             existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
         fi
@@ -1200,7 +1198,6 @@ build_vless_reality() {
             privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}')
             pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}')
             if [[ -z "$privkey" ]]; then
-                # 异常兜底保护
                 privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
                 pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
             fi
@@ -1287,7 +1284,6 @@ build_vless_reality() {
     ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
     ask_val hs_port   "handshake port" "8001"
 
-    # 将 pk 写入 tag 中，便于未来旧节点导入时直接提取。
     cat > "$_jf" << EOF
     {
       "type": "vless",
@@ -1878,6 +1874,9 @@ configure_singbox() {
         
         if [[ "$import_choice" == "1" ]]; then
             need_parse=true
+        else
+            # 用户选择生成全新配置时，清空之前缓存或预设的旧环境变量，确保彻底全新生成
+            for var in ${!OLD_*}; do unset "$var"; done
         fi
 
         if [[ "$need_parse" == "true" ]]; then
