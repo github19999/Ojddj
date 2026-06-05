@@ -1,17 +1,10 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.5 (优化版)
+#   版本号：jddj-ge-v7.4 (优化版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (jddj-ge-v7.5 优化版)】
-#   优化1：优化配置 sing-box 时的交互逻辑，取消复杂的自动判断，任何时候进入
-#         该选项均统一提示是否导入旧节点链接，以提供一致的操作预期。并在
-#         选择生成全新配置时清空环境变量缓存，确保全新生成逻辑正常。
-# ================================================================
-# 【往期核心优化回顾】
-#   v7.4：修复导入旧节点时特殊字符引发的提取截断BUG；增加自动识别本地订阅机制。
-#   v7.3：VLESS-REALITY 采纳“Tag 藏钥法”，完美实现 REALITY 节点的无损重装。
+
 # ================================================================
 
 # 遇到错误立即退出
@@ -29,7 +22,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="jddj-ge-v7.5"
+SCRIPT_VERSION="jddj-ge-v7.4"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -1175,11 +1168,13 @@ build_vless_reality() {
 
     local privkey pubkey existing_pk="" existing_pub=""
     
+    # 核心优化：利用 Tag 藏钥法进行数据还原
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
         privkey="$OLD_VLESS_REALITY_PK"
         pubkey="$OLD_VLESS_REALITY_PBK"
         echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功 100% 还原 REALITY 密钥对！${NC}"
     else
+        # 尝试从本地已存在的 config 中读取 (用于无导入直接重装等情况)
         if [[ -f /etc/sing-box/config.json ]]; then
             existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
         fi
@@ -1198,6 +1193,7 @@ build_vless_reality() {
             privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}')
             pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}')
             if [[ -z "$privkey" ]]; then
+                # 异常兜底保护
                 privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
                 pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
             fi
@@ -1284,6 +1280,7 @@ build_vless_reality() {
     ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
     ask_val hs_port   "handshake port" "8001"
 
+    # 将 pk 写入 tag 中，便于未来旧节点导入时直接提取。
     cat > "$_jf" << EOF
     {
       "type": "vless",
@@ -1862,21 +1859,49 @@ configure_singbox() {
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
+        local has_old_data=false
+        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
+        
+        local has_local_sub=false
+        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
+
         local import_choice=""
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
 
+        # 统一无条件展示这句核心提示语
         echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
-        echo -e "  1) 是，导入旧节点链接"
-        echo -e "  2) 否，生成全新配置 [默认]"
-        read -rp "请选择 (1-2, 默认 2): " import_choice
-        import_choice=${import_choice:-2}
-        
-        if [[ "$import_choice" == "1" ]]; then
-            need_parse=true
+
+        if [[ "$has_old_data" == "true" ]]; then
+            echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
+            echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
+            echo -e "  2) 保持现有旧节点数据，直接进入配置 [默认]"
+            read -rp "请选择 (1-2, 默认 2): " import_choice
+            import_choice=${import_choice:-2}
+            if [[ "$import_choice" == "1" ]]; then
+                need_parse=true
+            fi
+        elif [[ "$has_local_sub" == "true" ]]; then
+            echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
+            echo -e "  1) 自动读取并导入本地旧节点数据 [默认]"
+            echo -e "  2) 手动粘贴导入其他旧节点链接"
+            echo -e "  3) 否，生成全新配置 (随机生成)"
+            read -rp "请选择 (1-3, 默认 1): " import_choice
+            import_choice=${import_choice:-1}
+            if [[ "$import_choice" == "1" ]]; then
+                cat /etc/sing-box/subscription.txt > "$links_file"
+                need_parse=true
+            elif [[ "$import_choice" == "2" ]]; then
+                need_parse=true
+            fi
         else
-            # 用户选择生成全新配置时，清空之前缓存或预设的旧环境变量，确保彻底全新生成
-            for var in ${!OLD_*}; do unset "$var"; done
+            echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
+            echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
+            read -rp "请选择 (1-2, 默认 2): " import_choice
+            import_choice=${import_choice:-2}
+            if [[ "$import_choice" == "1" ]]; then
+                need_parse=true
+            fi
         fi
 
         if [[ "$need_parse" == "true" ]]; then
