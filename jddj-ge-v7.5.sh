@@ -1869,7 +1869,7 @@ configure_singbox() {
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
 
-        # 统一无条件展示这句核心提示语
+        # 核心修复：无条件前置上下文提示语，统一交互体验
         echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
 
         if [[ "$has_old_data" == "true" ]]; then
@@ -1895,6 +1895,7 @@ configure_singbox() {
                 need_parse=true
             fi
         else
+            # 取消了原有的提示语，因为已经提取到了最上方
             echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
             echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
             read -rp "请选择 (1-2, 默认 2): " import_choice
@@ -1918,6 +1919,7 @@ configure_singbox() {
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
                 
                 cat > "$py_script" << 'PYEOF'
+# ... [保留原有的 Python 解析代码完全不变] ...
 import sys, urllib.parse, base64, json, re
 
 input_text = sys.stdin.read().strip()
@@ -2127,6 +2129,7 @@ PYEOF
         fi
         rm -f "$links_file"
 
+        # ... [后续协议选择循环保持原样完全不变] ...
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
         echo "   1)  VLESS — TCP / XTLS-Vision"
