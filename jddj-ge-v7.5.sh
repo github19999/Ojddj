@@ -1,12 +1,9 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：jddj-ge-v7.6 (极限防闪退修复版)
+#   版本号：jddj-ge-v7.7 (终极防闪退 & 防降级保护版)
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-
-# 遇到错误立即退出
-set -e  
 
 # ────────────────────────────────────────────────────────────────
 #  颜色 & 日志
@@ -20,7 +17,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="jddj-ge-v7.6"
+SCRIPT_VERSION="jddj-ge-v7.7"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -1844,7 +1841,6 @@ EOF
 }
 
 configure_singbox() {
-    # 极强容错：就算安装失败，也仅输出警告而不闪退！
     if ! command -v python3 &>/dev/null; then
         log_info "正在预装 python3 以支持节点解析..."
         if command -v apt &>/dev/null; then 
@@ -1862,11 +1858,7 @@ configure_singbox() {
         fi
     fi
 
-    # ====================================================================
-    # 核心优化：退出脚本后，自动通过逆向解析本地 config.json 恢复环境变量！
-    # ====================================================================
     if [[ -f "/etc/sing-box/config.json" ]]; then
-        # 仅在未读取过数据时提取，防止覆盖当前会话中的手动输入
         if [[ -z "$OLD_VLESS_TCP_PORT" && -z "$OLD_VLESS_REALITY_UUID" && -z "$OLD_TUIC_PORT" && -z "$OLD_HY2_PORT" && -z "$OLD_VMESS_WS_PORT" && -z "$OLD_TROJAN_TCP_PORT" && -z "$OLD_SS256_PORT" && -z "$OLD_SS_PORT" ]]; then
             local py_script_local
             py_script_local=$(mktemp /tmp/parse_local.XXXXXX.py 2>/dev/null || echo "/tmp/parse_local_$RANDOM.py")
@@ -2018,7 +2010,6 @@ PYEOF
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
-        # 杜绝 && 简写造成的 set -e 闪退
         local has_old_data=false
         if [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" || -n "$OLD_SS_PORT" || -n "$OLD_ANYTLS_PORT" || -n "$OLD_NAIVE_PORT" ]]; then
             has_old_data=true
@@ -3080,35 +3071,35 @@ main_menu() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令
+#  安装 jddj 快捷命令 (防静默降级优化)
 # ────────────────────────────────────────────────────────────────
-# 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v6.sh"
-
 install_self() {
     local target="/usr/bin/jddj"
-    [[ "$0" == "$target" ]] && return 0
+    
+    # 检查是否已经是快捷命令环境
+    if [[ "$0" == "$target" ]]; then 
+        return 0
+    fi
 
+    # 检查版本避免重复覆盖
     local current_ver=""
     if [[ -s "$target" ]]; then
         current_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$target" 2>/dev/null | head -1 || true)
-        [[ "$current_ver" == "$SCRIPT_VERSION" ]] && return 0
+        if [[ "$current_ver" == "$SCRIPT_VERSION" ]]; then 
+            return 0
+        fi
     fi
 
+    # 如果是从本地文件执行的，则复制到 /usr/bin/
     if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
         install -m 755 "$0" "$target" 2>/dev/null || true
-        log_success "已安装快捷命令: jddj (本地复制)"
+        log_success "已在本地安装快捷命令: jddj (复制当前最新版)"
     else
-        if [[ -z "$JDDJ_REMOTE_URL" || "$JDDJ_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
-            log_warn "未配置真实的 JDDJ_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
-        else
-            if curl -fsSL --connect-timeout 5 --max-time 20 "$JDDJ_REMOTE_URL" -o "$target" 2>/dev/null; then
-                chmod 755 "$target" 2>/dev/null || true
-                log_success "已安装快捷命令: jddj (远程同步)"
-            else
-                log_warn "快捷命令远程同步失败，请检查网络或 JDDJ_REMOTE_URL 是否正确。"
-            fi
-        fi
+        # 核心防坑：拦截直接粘贴代码/使用管道触发远程下载旧版本的陷阱！
+        log_warn "检测到当前为管道流或内存粘贴运行，跳过快捷命令创建。"
+        log_info "【保护机制】已禁止自动从旧版 GitHub 链接 (v6) 下载覆盖，防止功能降级丢失！"
+        log_info "如果需要 jddj 快捷指令，请将本代码保存为文件 (如 test.sh) 再执行 bash test.sh。"
+        sleep 2
     fi
 
     command -v hash &>/dev/null && hash -r || true
