@@ -5,11 +5,13 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (jddj-ge-v7.5 优化版)】
-#   优化1：移除 v7.4 中引入的“自动检测并加载本地 subscription.txt 订阅文件”
-#         功能，彻底恢复原版的手动粘贴导入交互逻辑，确保每次进入「4. 配置 
-#         sing-box」时都能正常显示旧节点导入提示及 1/2 选项。
-#   保留特性：完整保留 v7.4 的 TUIC/Naïve 特殊字符密码解码修复，以及 v7.3 
-#           的 VLESS-REALITY 藏钥法无损重装功能。其他所有功能均未改变。
+#   优化1：优化配置 sing-box 时的交互逻辑。去除了本地历史节点配置强制弹窗，
+#         当通过 jddj 重新进入主菜单并选择配置 sing-box 时，固定显示：
+#         “是否需要导入旧节点链接以保持配置参数不变？” 并提供干净的 1/2 选项。
+# ================================================================
+# 【往期核心优化回顾】
+#   v7.4：修复导入旧节点时特殊字符导致断层的 BUG；新增本地历史节点配置读取机制。
+#   v7.3：VLESS-REALITY 采纳“Tag 藏钥法”，完美实现 REALITY 节点的无损重装。
 # ================================================================
 
 # 遇到错误立即退出
@@ -1864,36 +1866,30 @@ configure_singbox() {
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
-        local has_old_data=false
-        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
-        
-        if [[ "$has_old_data" == "true" ]]; then
-            echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
-            echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
-            echo -e "  2) 保持现有旧节点数据，直接进入配置 [默认]"
-        else
-            echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
-            echo -e "  1) 是，导入旧节点链接"
-            echo -e "  2) 否，生成全新配置 [默认]"
-        fi
-
         local import_choice=""
+        local need_parse=false
+        local links_file=$(mktemp /tmp/old_links.XXXXXX)
+
+        echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
+        echo -e "  1) 是，导入旧节点链接"
+        echo -e "  2) 否，生成全新配置 [默认]"
         read -rp "请选择 (1-2, 默认 2): " import_choice
         import_choice=${import_choice:-2}
-
+        
         if [[ "$import_choice" == "1" ]]; then
-            echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
+            need_parse=true
+        fi
+
+        if [[ "$need_parse" == "true" ]]; then
+            if [[ ! -s "$links_file" ]]; then
+                echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
+                while IFS= read -r line; do
+                    [[ "$line" == "EOF" ]] && break
+                    echo "$line" >> "$links_file"
+                done
+            fi
             
-            local links_file=$(mktemp /tmp/old_links.XXXXXX)
-            local has_input=false
-            
-            while IFS= read -r line; do
-                [[ "$line" == "EOF" ]] && break
-                [[ -n "$line" ]] && has_input=true
-                echo "$line" >> "$links_file"
-            done
-            
-            if [[ "$has_input" == "true" ]]; then
+            if [[ -s "$links_file" ]]; then
                 log_info "正在解析旧节点数据..."
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
                 
