@@ -2921,7 +2921,7 @@ main_menu() {
 #  安装 jddj 快捷命令
 # ────────────────────────────────────────────────────────────────
 # 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v6.sh"
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v7.4.sh"
 
 install_self() {
     local target="/usr/bin/jddj"
