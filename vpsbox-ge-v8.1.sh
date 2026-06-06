@@ -15,6 +15,8 @@
 #      增加防重复误部署检测；在主菜单及服务管理中增加面板地址专有查看选项。
 #   6. Wallos 部署优化：彻底修复 Wallos 与 Sub-Store 绑定同一域名导致的
 #      Nginx 路由冲突问题，增加强验证拦截，强制要求域名隔离。
+#   7. 紧急修复：修复干净环境下运行 sing-box 节点配置时，因目录未提前
+#      创建导致 reality_meta.conf 写入失败而引起的脚本崩溃问题。
 # ================================================================
 
 # 遇到错误立即退出
@@ -1460,6 +1462,9 @@ build_vless_reality() {
 
     local privkey pubkey existing_pk="" existing_pub=""
     
+    # 强制提前创建目录，解决干净系统未安装即配置导致的崩溃问题
+    mkdir -p /etc/sing-box 2>/dev/null || true
+
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
         privkey="$OLD_VLESS_REALITY_PK"
         pubkey="$OLD_VLESS_REALITY_PBK"
@@ -2139,6 +2144,9 @@ configure_singbox() {
         elif command -v dnf &>/dev/null; then dnf install -y python3 >/dev/null 2>&1;
         elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
     fi
+    
+    # 强制所有节点配置入口提前创建所需环境结构
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
 
     while true; do
         clear
@@ -2502,7 +2510,6 @@ PYEOF
         done
         rm -f "$TMP_JSON"
 
-        mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
         cat > /etc/sing-box/config.json << EOF
 {
   "log": {
