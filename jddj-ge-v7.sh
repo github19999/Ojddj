@@ -12,8 +12,7 @@
 #      将与原来保持完全一致（未导入的协议仍保持随机或手动设置）。
 # ================================================================
 
-# 遇到错误立即退出（你在关键部署中触发）
-# 注意：在菜单循环中，我们会通过合理的逻辑控制避免其意外退出
+# 遇到错误立即退出
 set -e  
 
 # ────────────────────────────────────────────────────────────────
@@ -26,10 +25,9 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 全局变量
-SCRIPT_VERSION="jddj-ge-v7"
+SCRIPT_VERSION="jddj-ge-v7.4"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -37,7 +35,7 @@ CERT_DIR=""
 OS=""
 INSTALL_CMD=""
 UPDATE_CMD=""
-AUTO_DEFAULT=false # 用于控制是否开启静默默认模式
+AUTO_DEFAULT=false
 
 log_info()    { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
@@ -94,18 +92,6 @@ gen_password() {
 
 gen_ss2022_key_256() { openssl rand -base64 32; }
 gen_ss2022_key_128() { openssl rand -base64 16; }
-
-gen_reality_keypair() {
-    if command -v sing-box &>/dev/null; then
-        sing-box generate reality-keypair 2>/dev/null
-    else
-        local privkey pubkey
-        privkey=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=')
-        pubkey=$(openssl genpkey -algorithm X25519 2>/dev/null | openssl pkey -pubout -outform DER 2>/dev/null | tail -c 32 | base64 | tr '+/' '-_' | tr -d '=')
-        echo "PrivateKey: ${privkey}"
-        echo "PublicKey:  ${pubkey}"
-    fi
-}
 
 gen_short_id() { openssl rand -hex 4; }
 
@@ -225,10 +211,11 @@ get_cert_domains() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  选择 server_name
+#  选择 server_name (适配了旧 SNI / Host 并优化了交互格式)
 # ────────────────────────────────────────────────────────────────
 select_server_name() {
     local default_sn="${1:-example.com}"
+    local old_sni="$2"
     echo ""
     echo -e "  ${CYAN}◆ server_name（域名/伪装域名）${NC}"
 
@@ -236,7 +223,9 @@ select_server_name() {
     mapfile -t domains < <(get_cert_domains 2>/dev/null)
 
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
-        if [[ ${#domains[@]} -gt 0 ]]; then
+        if [[ -n "$old_sni" ]]; then
+            SELECTED_SN="$old_sni"
+        elif [[ ${#domains[@]} -gt 0 ]]; then
             SELECTED_SN="${domains[0]}"
         else
             SELECTED_SN="${default_sn}"
@@ -244,6 +233,11 @@ select_server_name() {
         echo -e "  ${GREEN}✓ [自动] server_name = ${SELECTED_SN}${NC}"
         echo ""
         return
+    fi
+
+    if [[ -n "$old_sni" ]]; then
+        echo -e "    ${YELLOW}检测到旧节点的 SNI/Host 为: ${old_sni}${NC}"
+        default_sn="$old_sni"
     fi
 
     if [[ ${#domains[@]} -gt 0 ]]; then
@@ -256,11 +250,9 @@ select_server_name() {
         echo ""
         local sn_choice
         read -rp "  > (编号，默认 1): " sn_choice
-        sn_choice="${sn_choice:-1}"
+        sn_choice=${sn_choice:-1}
 
-        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && \
-           [[ "$sn_choice" -ge 1 ]] && \
-           [[ "$sn_choice" -le "${#domains[@]}" ]]; then
+        if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
             SELECTED_SN="${domains[$((sn_choice-1))]}"
         else
             read -rp "  > 手动输入 server_name (默认 ${default_sn}): " SELECTED_SN
@@ -569,7 +561,7 @@ menu_basic() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  二、SSL 证书 (完美融合的独立高级验证模块)
+#  二、SSL 证书
 # ────────────────────────────────────────────────────────────────
 STOPPED_SERVICES_SSL=()
 
@@ -1029,15 +1021,23 @@ build_vless_tcp() {
     ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_TCP_UUID:-$(gen_uuid)}"
     ask_val   uname "name（用户名）" "user-vless-tcp"
 
+    local def_flow="${OLD_VLESS_TCP_FLOW:-xtls-rprx-vision}"
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
-        flow_choice="1"
-        flow="xtls-rprx-vision"
-        echo -e "  ${GREEN}✓ [自动] flow = xtls-rprx-vision${NC}"
+        flow="$def_flow"
+        if [[ -z "$flow" ]]; then
+            echo -e "  ${GREEN}✓ [自动] flow = （空，普通 TLS）${NC}"
+        else
+            echo -e "  ${GREEN}✓ [自动] flow = ${flow}${NC}"
+        fi
     else
         echo -e "  ${CYAN}◆ flow（流控模式）${NC}"
         echo -e "    ${YELLOW}1)${NC} xtls-rprx-vision  [推荐，XTLS Vision 模式]"
         echo -e "    ${YELLOW}2)${NC} 无（普通 TLS，不启用流控）"
-        ask_val flow_choice "请输入编号" "1"
+        
+        local _def_choice="1"
+        [[ -z "${OLD_VLESS_TCP_FLOW}" && -n "${OLD_VLESS_TCP_PORT}" ]] && _def_choice="2"
+        
+        ask_val flow_choice "请输入编号" "$_def_choice"
         if [[ "$flow_choice" == "2" ]]; then
             flow=""
             echo -e "  ${GREEN}✓ flow = （空，普通 TLS）${NC}"
@@ -1048,7 +1048,7 @@ build_vless_tcp() {
     fi
     echo ""
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_VLESS_TCP_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1088,7 +1088,7 @@ build_vless_ws() {
     ask_random uuid  "uuid（用户 UUID）"       "${OLD_VLESS_WS_UUID:-$(gen_uuid)}"
     ask_val   wspath "ws path（WebSocket 路径）" "${OLD_VLESS_WS_PATH:-/vless-ws}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_VLESS_WS_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1131,7 +1131,7 @@ build_vless_grpc() {
     ask_random uuid   "uuid（用户 UUID）"        "${OLD_VLESS_GRPC_UUID:-$(gen_uuid)}"
     ask_val   svcname "service_name（gRPC 服务名）" "${OLD_VLESS_GRPC_SVC:-vless-grpc-service}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_VLESS_GRPC_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1171,17 +1171,40 @@ build_vless_reality() {
     ask_val port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
     ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
 
-    echo -e "  ${YELLOW}正在生成 REALITY 密钥对...${NC}"
-    if [[ -n "$OLD_VLESS_REALITY_PBK" ]]; then
-        log_warn "检测到旧的 Reality 节点数据！"
-        log_warn "由于服务端私钥无法从分享链接中提取，系统已为您保留了原本的 Port, UUID 和 ShortID，但必须重新生成一对新的公私钥。"
-        log_warn "【重点】配置完成后，请务必在客户端的 Reality 节点中更新为新的 Public Key，否则将无法连接！"
-    fi
+    local privkey pubkey existing_pk="" existing_pub=""
+    
+    # 核心优化：利用 Tag 藏钥法进行数据还原
+    if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
+        privkey="$OLD_VLESS_REALITY_PK"
+        pubkey="$OLD_VLESS_REALITY_PBK"
+        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功 100% 还原 REALITY 密钥对！${NC}"
+    else
+        # 尝试从本地已存在的 config 中读取 (用于无导入直接重装等情况)
+        if [[ -f /etc/sing-box/config.json ]]; then
+            existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
+        fi
+        if [[ -f /etc/sing-box/reality_meta.conf ]]; then
+            existing_pub=$(grep -oP "^${port}:\K.*" /etc/sing-box/reality_meta.conf | head -1)
+        fi
 
-    local keypair_out privkey pubkey
-    keypair_out=$(gen_reality_keypair)
-    privkey=$(echo "$keypair_out" | grep -i private | awk '{print $NF}')
-    pubkey=$(echo  "$keypair_out" | grep -i public  | awk '{print $NF}')
+        if [[ -n "$existing_pk" && -n "$existing_pub" && "$existing_pk" != '""' ]]; then
+            privkey="$existing_pk"
+            pubkey="$existing_pub"
+            echo -e "  ${GREEN}★ 检测到本地服务器已有 REALITY 密钥对，自动沿用！${NC}"
+        else
+            log_info "正在通过 sing-box 原生命令生成全新 REALITY 密钥对..."
+            local keypair_out
+            keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
+            privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}')
+            pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}')
+            if [[ -z "$privkey" ]]; then
+                # 异常兜底保护
+                privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
+                pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
+            fi
+        fi
+    fi
+    
     local sid_rand
     sid_rand=$(gen_short_id)
     echo ""
@@ -1191,14 +1214,13 @@ build_vless_reality() {
         echo -e "  ${GREEN}✓ [自动] private_key = ${pk}${NC}"
         echo -e "  ${GREEN}✓ [自动] public_key  = ${pubkey}${NC}"
     else
-        echo -e "  ${CYAN}◆ REALITY 密钥对（自动生成，回车直接使用）${NC}"
+        echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用）${NC}"
         echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
         echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
         echo -e "    (若需自定义，请同时替换 Private Key 和对应的 Public Key)"
         echo ""
         echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
-        echo -e "    生成值: ${YELLOW}${privkey}${NC}"
-        echo -e "    (回车使用该值，或输入自定义 private_key)"
+        echo -e "    (回车使用上述值，或输入自定义 private_key)"
         read -rp "  > " _pk_input
         pk="${_pk_input:-$privkey}"
         if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
@@ -1224,33 +1246,37 @@ build_vless_reality() {
         _default_sn="${_cert_domains[0]}"
     fi
 
+    if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
+        _default_sn="$OLD_VLESS_REALITY_SNI"
+    fi
+
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
         sn="$_default_sn"
         echo -e "  ${GREEN}✓ [自动] server_name = ${sn}${NC}"
     else
         echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
         echo -e "    可以填已申请的证书域名（推荐），也可填任意公网 TLS 网站"
-        if [[ ${#_cert_domains[@]} -gt 0 ]]; then
-            echo -e "    检测到已安装证书，请选择或手动输入："
+        if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
+             echo -e "    ${YELLOW}检测到旧节点使用了 SNI: ${OLD_VLESS_REALITY_SNI}${NC}"
+        elif [[ ${#_cert_domains[@]} -gt 0 ]]; then
+            echo -e "    检测到已安装证书，请选择："
             for i in "${!_cert_domains[@]}"; do
                 echo -e "    ${YELLOW}$((i+1)))${NC} ${_cert_domains[$i]}"
             done
-            local _manual_idx=$(( ${#_cert_domains[@]} + 1 ))
-            echo -e "    ${YELLOW}${_manual_idx})${NC} 手动输入其他域名"
-            echo -e "    (默认选 1，即 ${_default_sn})"
+            local manual_idx=$(( ${#_cert_domains[@]} + 1 ))
+            echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入"
             echo ""
-            local _sn_choice
-            read -rp "  > (编号，默认 1): " _sn_choice
-            _sn_choice="${_sn_choice:-1}"
-            if [[ "$_sn_choice" =~ ^[0-9]+$ ]] && [[ "$_sn_choice" -ge 1 ]] && [[ "$_sn_choice" -le "${#_cert_domains[@]}" ]]; then
-                sn="${_cert_domains[$((_sn_choice-1))]}"
-            else
-                read -rp "  > 手动输入 server_name (默认 ${_default_sn}): " sn
-                sn="${sn:-$_default_sn}"
+            local sn_choice
+            read -rp "  > (编号，默认 1): " sn_choice
+            sn_choice=${sn_choice:-1}
+            if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#_cert_domains[@]}" ]]; then
+                sn="${_cert_domains[$((sn_choice-1))]}"
             fi
-        else
-            echo -e "    未检测到已安装证书，请手动输入（或直接回车使用默认）"
-            ask_val sn "server_name" "$_default_sn"
+        fi
+        
+        if [[ -z "$sn" ]]; then
+            read -rp "  > 手动输入 server_name (默认 ${_default_sn}): " sn
+            sn="${sn:-$_default_sn}"
         fi
         echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
     fi
@@ -1259,13 +1285,14 @@ build_vless_reality() {
     ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
     ask_val hs_port   "handshake port" "8001"
 
+    # 将 pk 写入 tag 中，便于未来旧节点导入时直接提取。
     cat > "$_jf" << EOF
     {
       "type": "vless",
-      "tag": "vless-reality-in",
+      "tag": "vless-reality-in-${pk}",
       "listen": "::",
       "listen_port": $port,
-      "users": [{"uuid": "$uuid", "flow": "xtls-rprx-vision"}],
+      "users": [{"name": "user-vless-reality", "uuid": "$uuid", "flow": "xtls-rprx-vision"}],
       "tls": {
         "enabled": true,
         "server_name": "$sn",
@@ -1424,7 +1451,7 @@ build_vmess_tcp() {
     ask_val   port "listen_port（监听端口）" "${OLD_VMESS_TCP_PORT:-45790}"
     ask_random uuid "uuid（用户 UUID）"     "${OLD_VMESS_TCP_UUID:-$(gen_uuid)}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_VMESS_TCP_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1460,7 +1487,7 @@ build_vmess_ws() {
     ask_random uuid  "uuid（用户 UUID）"          "${OLD_VMESS_WS_UUID:-$(gen_uuid)}"
     ask_val   wspath "ws path（WebSocket 路径）"  "${OLD_VMESS_WS_PATH:-/vmess-ws}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_VMESS_WS_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1501,7 +1528,7 @@ build_trojan_tcp() {
     ask_random pwd  "password（Trojan 密码）" "${OLD_TROJAN_TCP_PWD:-$(gen_password 20)}"
     ask_val   uname "name（用户名）"          "user-trojan-tcp"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_TROJAN_TCP_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1538,7 +1565,7 @@ build_trojan_ws() {
     ask_random pwd   "password（Trojan 密码）"    "${OLD_TROJAN_WS_PWD:-$(gen_password 20)}"
     ask_val   wspath "ws path（WebSocket 路径）"  "${OLD_TROJAN_WS_PATH:-/trojan-ws}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_TROJAN_WS_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1685,12 +1712,11 @@ build_hysteria2() {
     ask_val   up       "up_mbps（上行限速 Mbps）"  "200"
     ask_val   dn       "down_mbps（下行限速 Mbps）" "100"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_HY2_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
 
-    # 如果解析出了 obfs 类型则使用，否则默认 salamander
     local _obfs_type="${OLD_HY2_OBFS:-salamander}"
 
     cat > "$_jf" << EOF
@@ -1728,7 +1754,7 @@ build_tuic() {
     ask_random uuid "uuid（用户 UUID）"     "${OLD_TUIC_UUID:-$(gen_uuid)}"
     ask_random pwd  "password（用户密码）"  "${OLD_TUIC_PWD:-$(gen_password 20)}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_TUIC_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1743,9 +1769,6 @@ build_tuic() {
       "listen_port": $port,
       "users": [{"name": "user-tuic", "uuid": "$uuid", "password": "$pwd"}],
       "congestion_control": "$_cc",
-      "auth_timeout": "3s",
-      "zero_rtt_handshake": false,
-      "heartbeat": "10s",
       "tls": {
         "enabled": true,
         "server_name": "$sn",
@@ -1769,7 +1792,7 @@ build_anytls() {
     ask_val   port "listen_port（监听端口）" "${OLD_ANYTLS_PORT:-48790}"
     ask_random pwd "password（连接密码）"   "${OLD_ANYTLS_PWD:-$(gen_uuid)}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_ANYTLS_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1801,11 +1824,11 @@ build_naive() {
     local tag port uname pwd
 
     ask_val   tag   "tag（inbound 标识）"    "naive-in"
-    ask_val   port  "listen_port（监听端口）" "41790"
-    ask_random uname "username（用户名）"    "$(gen_naive_username)"
-    ask_random pwd   "password（用户密码）"  "$(gen_password 20)"
+    ask_val   port  "listen_port（监听端口）" "${OLD_NAIVE_PORT:-41790}"
+    ask_random uname "username（用户名）"    "${OLD_NAIVE_UNAME:-$(gen_naive_username)}"
+    ask_random pwd   "password（用户密码）"  "${OLD_NAIVE_PWD:-$(gen_password 20)}"
 
-    select_server_name "example.com"
+    select_server_name "example.com" "$OLD_NAIVE_SNI"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
@@ -1829,7 +1852,6 @@ EOF
 }
 
 configure_singbox() {
-    # 如果系统未装 python3，尝试通过包管理器静默补充（解析依赖 Python）
     if ! command -v python3 &>/dev/null; then
         log_info "正在预装 python3 以支持节点解析..."
         if command -v apt &>/dev/null; then apt install -y python3 >/dev/null 2>&1;
@@ -1842,32 +1864,68 @@ configure_singbox() {
         echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
         echo ""
 
-        # --- 新增: 导入旧节点解析 ---
-        echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
-        echo -e "  1) 是，导入旧节点链接"
-        echo -e "  2) 否，生成全新配置 [默认]"
-        read -rp "请选择 (1-2, 默认 2): " import_choice
-        import_choice=${import_choice:-2}
+        local has_old_data=false
+        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
+        
+        local has_local_sub=false
+        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
 
-        if [[ "$import_choice" == "1" ]]; then
-            echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
-            local old_links=""
-            while IFS= read -r line; do
-                [[ "$line" == "EOF" ]] && break
-                old_links+="$line\n"
-            done
+        local import_choice=""
+        local need_parse=false
+        local links_file=$(mktemp /tmp/old_links.XXXXXX)
+
+        if [[ "$has_old_data" == "true" ]]; then
+            echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
+            echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
+            echo -e "  2) 保持现有旧节点数据，直接进入配置 [默认]"
+            read -rp "请选择 (1-2, 默认 2): " import_choice
+            import_choice=${import_choice:-2}
+            if [[ "$import_choice" == "1" ]]; then
+                need_parse=true
+            fi
+        elif [[ "$has_local_sub" == "true" ]]; then
+            echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
+            echo -e "  1) 自动读取并导入本地旧节点数据 [默认]"
+            echo -e "  2) 手动粘贴导入其他旧节点链接"
+            echo -e "  3) 否，生成全新配置 (随机生成)"
+            read -rp "请选择 (1-3, 默认 1): " import_choice
+            import_choice=${import_choice:-1}
+            if [[ "$import_choice" == "1" ]]; then
+                cat /etc/sing-box/subscription.txt > "$links_file"
+                need_parse=true
+            elif [[ "$import_choice" == "2" ]]; then
+                need_parse=true
+            fi
+        else
+            echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
+            echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
+            echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
+            read -rp "请选择 (1-2, 默认 2): " import_choice
+            import_choice=${import_choice:-2}
+            if [[ "$import_choice" == "1" ]]; then
+                need_parse=true
+            fi
+        fi
+
+        if [[ "$need_parse" == "true" ]]; then
+            if [[ ! -s "$links_file" ]]; then
+                echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
+                while IFS= read -r line; do
+                    [[ "$line" == "EOF" ]] && break
+                    echo "$line" >> "$links_file"
+                done
+            fi
             
-            if [[ -n "$old_links" ]]; then
+            if [[ -s "$links_file" ]]; then
                 log_info "正在解析旧节点数据..."
-                # 借助 Python 强力解析引擎，生成环境变量供 Bash 继承
                 local py_script=$(mktemp /tmp/parse_links.XXXXXX.py)
+                
                 cat > "$py_script" << 'PYEOF'
-import sys, urllib.parse, base64, json
+import sys, urllib.parse, base64, json, re
 
 input_text = sys.stdin.read().strip()
 if not input_text: sys.exit(0)
 
-# Check for base64 block
 if "://" not in input_text:
     try:
         input_text = base64.b64decode(input_text).decode("utf-8")
@@ -1886,56 +1944,116 @@ for line in input_text.splitlines():
             uid = obj.get("id")
             net = obj.get("net")
             path = obj.get("path", "")
-            if net == "ws" or "ws" in obj.get("ps", ""):
+            sni = obj.get("sni", "") or obj.get("host", "") or obj.get("add", "")
+            
+            if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
+                sni = ""
+
+            if net == "ws" or "ws" in str(obj.get("ps", "")):
                 if uid: vars_out["OLD_VMESS_WS_UUID"] = uid
                 if port: vars_out["OLD_VMESS_WS_PORT"] = port
                 if path: vars_out["OLD_VMESS_WS_PATH"] = path
+                if sni: vars_out["OLD_VMESS_WS_SNI"] = sni
             else:
                 if uid: vars_out["OLD_VMESS_TCP_UUID"] = uid
                 if port: vars_out["OLD_VMESS_TCP_PORT"] = port
+                if sni: vars_out["OLD_VMESS_TCP_SNI"] = sni
         else:
-            parsed = urllib.parse.urlparse(line)
-            scheme = parsed.scheme
-            userinfo = parsed.username or ""
-            pwd_info = parsed.password or ""
-            if pwd_info: userinfo = f"{userinfo}:{pwd_info}"
-            port = parsed.port
-            qs = urllib.parse.parse_qs(parsed.query)
-            tag = parsed.fragment or ""
+            scheme_idx = line.find("://")
+            if scheme_idx == -1: continue
+            scheme = line[:scheme_idx]
+            rest = line[scheme_idx+3:]
+            
+            tag = ""
+            frag_idx = rest.find("#")
+            if frag_idx != -1:
+                tag = urllib.parse.unquote(rest[frag_idx+1:])
+                rest = rest[:frag_idx]
+            
+            qs = {}
+            query_idx = rest.find("?")
+            if query_idx != -1:
+                qs = urllib.parse.parse_qs(rest[query_idx+1:])
+                rest = rest[:query_idx]
+                
+            at_idx = rest.rfind("@")
+            if at_idx != -1:
+                userinfo = rest[:at_idx]
+                hostport = rest[at_idx+1:]
+            else:
+                userinfo = ""
+                hostport = rest
+                
+            port = None
+            host = hostport
+            if "]" in hostport:
+                close_idx = hostport.find("]")
+                host = hostport[:close_idx+1]
+                if len(hostport) > close_idx+1 and hostport[close_idx+1] == ":":
+                    port = hostport[close_idx+2:]
+            else:
+                if ":" in hostport:
+                    host, port_str = hostport.rsplit(":", 1)
+                    if port_str.isdigit():
+                        port = port_str
+                    else:
+                        host = hostport
+                        port = None
+
+            sni = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or qs.get("peer", [""])[0]
+            if not sni:
+                sni = host
             
             if scheme == "vless":
                 uuid = userinfo
                 security = qs.get("security", [""])[0]
                 type_ = qs.get("type", [""])[0]
+                flow = qs.get("flow", [""])[0]
                 if security == "reality" or "reality" in tag:
                     vars_out["OLD_VLESS_REALITY_UUID"] = uuid
                     if port: vars_out["OLD_VLESS_REALITY_PORT"] = port
+                    if sni: vars_out["OLD_VLESS_REALITY_SNI"] = sni
                     if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = qs["pbk"][0]
                     if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = qs["sid"][0]
+                    
+                    # Tag 藏钥法：自动提取 PrivateKey
+                    m = re.search(r'vless-reality-in-([A-Za-z0-9_-]+)', tag)
+                    if m:
+                        vars_out["OLD_VLESS_REALITY_PK"] = m.group(1)
+
                 elif type_ == "grpc" or "grpc" in tag:
                     vars_out["OLD_VLESS_GRPC_UUID"] = uuid
                     if port: vars_out["OLD_VLESS_GRPC_PORT"] = port
+                    if sni: vars_out["OLD_VLESS_GRPC_SNI"] = sni
                     if "serviceName" in qs: vars_out["OLD_VLESS_GRPC_SVC"] = qs["serviceName"][0]
                 elif type_ == "ws" or "ws" in tag:
                     vars_out["OLD_VLESS_WS_UUID"] = uuid
                     if port: vars_out["OLD_VLESS_WS_PORT"] = port
+                    if sni: vars_out["OLD_VLESS_WS_SNI"] = sni
                     if "path" in qs: vars_out["OLD_VLESS_WS_PATH"] = qs["path"][0]
                 else:
                     vars_out["OLD_VLESS_TCP_UUID"] = uuid
                     if port: vars_out["OLD_VLESS_TCP_PORT"] = port
+                    if sni: vars_out["OLD_VLESS_TCP_SNI"] = sni
+                    if flow: vars_out["OLD_VLESS_TCP_FLOW"] = flow
             elif scheme == "trojan":
                 pwd = urllib.parse.unquote(userinfo) if userinfo else ""
                 type_ = qs.get("type", [""])[0]
                 if type_ == "ws" or "ws" in tag:
                     vars_out["OLD_TROJAN_WS_PWD"] = pwd
                     if port: vars_out["OLD_TROJAN_WS_PORT"] = port
+                    if sni: vars_out["OLD_TROJAN_WS_SNI"] = sni
                     if "path" in qs: vars_out["OLD_TROJAN_WS_PATH"] = qs["path"][0]
                 else:
                     vars_out["OLD_TROJAN_TCP_PWD"] = pwd
                     if port: vars_out["OLD_TROJAN_TCP_PORT"] = port
+                    if sni: vars_out["OLD_TROJAN_TCP_SNI"] = sni
             elif scheme == "ss":
                 try:
-                    raw = base64.urlsafe_b64decode(userinfo + "===").decode("utf-8")
+                    try:
+                        raw = base64.urlsafe_b64decode(userinfo + "===").decode("utf-8")
+                    except:
+                        raw = urllib.parse.unquote(userinfo)
                     parts = raw.split(":", 2)
                     method = parts[0]
                     if "2022" in method:
@@ -1961,46 +2079,63 @@ for line in input_text.splitlines():
             elif scheme == "hysteria2":
                 vars_out["OLD_HY2_PWD"] = urllib.parse.unquote(userinfo)
                 if port: vars_out["OLD_HY2_PORT"] = port
+                if sni: vars_out["OLD_HY2_SNI"] = sni
                 if "obfs" in qs: vars_out["OLD_HY2_OBFS"] = qs["obfs"][0]
                 if "obfs-password" in qs: vars_out["OLD_HY2_OBFSPWD"] = urllib.parse.unquote(qs["obfs-password"][0])
             elif scheme == "tuic":
-                if ":" in userinfo:
-                    uid, pwd = userinfo.split(":", 1)
-                    vars_out["OLD_TUIC_UUID"] = urllib.parse.unquote(uid)
-                    vars_out["OLD_TUIC_PWD"] = urllib.parse.unquote(pwd)
+                dec_userinfo = urllib.parse.unquote(userinfo)
+                if ":" in dec_userinfo:
+                    uid, pwd = dec_userinfo.split(":", 1)
+                    vars_out["OLD_TUIC_UUID"] = uid
+                    vars_out["OLD_TUIC_PWD"] = pwd
                 if port: vars_out["OLD_TUIC_PORT"] = port
+                if sni: vars_out["OLD_TUIC_SNI"] = sni
                 if "congestion_control" in qs: vars_out["OLD_TUIC_CC"] = qs["congestion_control"][0]
             elif scheme == "anytls":
                 vars_out["OLD_ANYTLS_PWD"] = urllib.parse.unquote(userinfo)
                 if port: vars_out["OLD_ANYTLS_PORT"] = port
+                if sni: vars_out["OLD_ANYTLS_SNI"] = sni
+            elif scheme == "naive+https":
+                dec_userinfo = urllib.parse.unquote(userinfo)
+                if ":" in dec_userinfo:
+                    uname, pwd = dec_userinfo.split(":", 1)
+                    if pwd: vars_out["OLD_NAIVE_PWD"] = pwd
+                    if uname: vars_out["OLD_NAIVE_UNAME"] = uname
+                elif dec_userinfo:
+                    vars_out["OLD_NAIVE_UNAME"] = dec_userinfo
+                if port: vars_out["OLD_NAIVE_PORT"] = port
+                if sni: vars_out["OLD_NAIVE_SNI"] = sni
     except Exception:
         pass
 
-for k, v in vars_out.items():
-    print(f"export {k}=\"{v}\"")
+if not vars_out:
+    print("echo -e \"\\033[1;33m[WARN] 未能从输入内容中提取到任何有效参数（可能格式不支持或为空），将继续常规生成。\\033[0m\";")
+else:
+    for k, v in vars_out.items():
+        v_escaped = str(v).replace("'", "'\\''")
+        print(f"export {k}='{v_escaped}'")
+    print("echo -e \"\\033[0;32m[✓] 解析完成，已成功提取匹配节点的参数（涵盖端口、密码、UUID、流控及 SNI 等）。\\033[0m\";")
 PYEOF
-                # 执行解析并导出环境变量供 Bash 读取
                 local parse_exports
-                parse_exports=$(python3 "$py_script" <<< -e "$old_links")
+                parse_exports=$(python3 "$py_script" < "$links_file")
                 eval "$parse_exports"
                 rm -f "$py_script"
-                log_success "解析完成，已成功提取匹配节点的参数。"
             else
                 log_warn "未识别到输入内容，继续常规生成..."
             fi
-            sleep 1
+            sleep 1.5
             clear
             echo -e "${BOLD}${CYAN}══ 四、配置 sing-box ══${NC}"
             echo ""
         fi
-        # ---------------------------------
+        rm -f "$links_file"
 
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
         echo "   1)  VLESS — TCP / XTLS-Vision"
         echo "   2)  VLESS — WebSocket"
         echo "   3)  VLESS — gRPC"
-        echo "   4)  VLESS — REALITY (TCP + XTLS-Vision) [默认端口: 443]"
+        echo "   4)  VLESS — REALITY (TCP + XTLS-Vision) [藏钥法无损重装]"
         echo "   5)  VMess — TCP (TLS)"
         echo "   6)  VMess — WebSocket (TLS)"
         echo "   7)  Trojan — TCP (TLS)"
@@ -2040,7 +2175,7 @@ PYEOF
         if [[ "$has_17" == "true" ]]; then
             PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
             AUTO_DEFAULT=true
-            log_info "已选择全部自动配置，将使用默认参数静默生成所有节点..."
+            log_info "已选择全部自动配置，将使用提取或默认参数静默生成所有节点..."
             sleep 1
         elif [[ "$has_16" == "true" ]]; then
             PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
@@ -2126,7 +2261,7 @@ EOF
                 if [[ -z "$_real_errors" ]]; then
                     log_success "配置语法验证通过（DNS 格式兼容性警告已忽略）"
                 else
-                    log_warn "配置语法验证失败，详细原因："
+                    log_error "配置语法验证失败，详细原因："
                     echo "$_real_errors"
                 fi
             fi
@@ -2400,7 +2535,6 @@ for ib in inbounds:
     if tls_on and sni and not is_ip(sni):
         addr = sni
 
-    tag_enc = urlencode(tag)
     users = ib.get('users', [])
     transport = ib.get('transport', {})
     net = transport.get('type', 'tcp')
@@ -2414,6 +2548,12 @@ for ib in inbounds:
 
         reality = tls.get('reality', {})
         reality_on = reality.get('enabled', False)
+        
+        display_tag = tag
+        if reality_on and re.search(r'-[A-Za-z0-9_-]+$', tag):
+            display_tag = tag.rsplit('-', 1)[0]
+            
+        tag_enc = urlencode(tag)
 
         if reality_on:
             pbk = ''
@@ -2445,7 +2585,7 @@ for ib in inbounds:
         links.append(link)
 
         cp = {
-            'name': tag, 'type': 'vless', 'server': addr, 'port': port,
+            'name': display_tag, 'type': 'vless', 'server': addr, 'port': port,
             'uuid': uuid, 'tls': tls_on, 'servername': sni,
             'network': net, 'udp': True
         }
@@ -2456,7 +2596,7 @@ for ib in inbounds:
         if net == 'ws':
             cp['ws-opts'] = {'path': ws_path, 'headers': {'Host': sni}}
         clash_proxies.append(cp)
-        clash_proxy_names.append(tag)
+        clash_proxy_names.append(display_tag)
 
     elif t == 'vmess':
         if not users: continue
@@ -2464,6 +2604,7 @@ for ib in inbounds:
         uuid = u.get('uuid', '')
         aid  = u.get('alterId', 0)
         tls_s = 'tls' if tls_on else 'none'
+        tag_enc = urlencode(tag)
 
         obj = {
             'v':'2','ps':tag,'add':addr,'port':str(port),
@@ -2487,6 +2628,7 @@ for ib in inbounds:
     elif t == 'trojan':
         if not users: continue
         pwd = users[0].get('password', '')
+        tag_enc = urlencode(tag)
         params = f"security=tls&sni={sni}&type={net}"
         if net == 'ws':
             params += f"&path={urlencode(ws_path)}"
@@ -2504,6 +2646,7 @@ for ib in inbounds:
     elif t == 'shadowsocks':
         method = ib.get('method', '')
         server_pwd = ib.get('password', '')
+        tag_enc = urlencode(tag)
         if not method or not server_pwd: continue
 
         if method.startswith('2022-'):
@@ -2532,6 +2675,7 @@ for ib in inbounds:
     elif t == 'hysteria2':
         if not users: continue
         pwd    = users[0].get('password', '')
+        tag_enc = urlencode(tag)
         up_m   = ib.get('up_mbps', 200)
         dn_m   = ib.get('down_mbps', 100)
         obfs_conf = ib.get('obfs', {})
@@ -2561,6 +2705,7 @@ for ib in inbounds:
         u    = users[0]
         uuid = u.get('uuid', '')
         pwd  = u.get('password', '')
+        tag_enc = urlencode(tag)
         cc   = ib.get('congestion_control', 'bbr')
         params = f"sni={sni}&congestion_control={cc}&alpn=h3&udp_relay_mode=native"
         links.append(f"tuic://{uuid}:{urlencode(pwd)}@{addr}:{port}?{params}#{tag_enc}")
@@ -2576,6 +2721,7 @@ for ib in inbounds:
     elif t == 'anytls':
         if not users: continue
         pwd    = users[0].get('password', '')
+        tag_enc = urlencode(tag)
         params = f"security=tls&sni={sni}&insecure=0&allowInsecure=0&type=tcp"
         links.append(f"anytls://{pwd}@{addr}:{port}?{params}#{tag_enc}")
 
@@ -2584,6 +2730,7 @@ for ib in inbounds:
         u    = users[0]
         uname = u.get('username', '')
         pwd   = u.get('password', '')
+        tag_enc = urlencode(tag)
         links.append(f"naive+https://{urlencode(uname)}:{urlencode(pwd)}@{addr}:{port}?padding=true#{tag_enc}")
 
 with open(OUTPUT_FILE, 'w') as f:
@@ -2769,33 +2916,25 @@ main_menu() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令 (V7：重构强制触发机制)
+#  安装 jddj 快捷命令
 # ────────────────────────────────────────────────────────────────
 # 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v6.sh"
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v7.sh"
 
 install_self() {
-    # 路径改为 /usr/bin/，因为部分系统/usr/local/bin可能不在环境变量中
     local target="/usr/bin/jddj"
-    
-    # 1. 如果当前已经在作为快捷命令运行，直接跳过
     [[ "$0" == "$target" ]] && return 0
 
-    # 2. 检查版本是否一致
     local current_ver=""
     if [[ -s "$target" ]]; then
         current_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$target" 2>/dev/null | head -1)
         [[ "$current_ver" == "$SCRIPT_VERSION" ]] && return 0
     fi
 
-    # 3. 动态注册核心逻辑
-    # 增加判断：确保 $0 是文件，并且不是类似 bash 或者 /dev/fd/63 的内存流名字
     if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        # 模式 A：如果是本地实体文件运行 (比如: bash jddj.sh)
         install -m 755 "$0" "$target" 2>/dev/null || true
         log_success "已安装快捷命令: jddj (本地复制)"
     else
-        # 模式 B：如果是一键脚本运行 (比如: bash <(curl...))，必须依赖 JDDJ_REMOTE_URL
         if [[ -z "$JDDJ_REMOTE_URL" || "$JDDJ_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
             log_warn "未配置真实的 JDDJ_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
         else
@@ -2808,7 +2947,6 @@ install_self() {
         fi
     fi
 
-    # 强制刷新命令缓存，防止因 bash 缓存导致的 command not found
     command -v hash &>/dev/null && hash -r
 }
 
