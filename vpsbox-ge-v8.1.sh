@@ -3246,10 +3246,10 @@ main_menu() {
 #  安装 vpsbox 快捷命令
 # ────────────────────────────────────────────────────────────────
 # 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-vps_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsbox-ge-v8.1.sh"
+vpsbox_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsbox-ge-v8.1.sh"
 
 install_self() {
-    local target="/usr/bin/vps"
+    local target="/usr/bin/vpsbox"
     [[ "$0" == "$target" ]] && return 0
 
     local current_ver=""
