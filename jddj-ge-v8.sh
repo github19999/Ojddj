@@ -1,10 +1,10 @@
 #!/bin/bash
 # ================================================================
 #   服务器一键管理脚本 (jddj)
-#   版本号：vps-ge-v8
+#   版本号：jddj-ge-v8
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (vps-ge-v8)】
+# 【本次优化内容 (jddj-ge-v8)】
 #   1. 重构菜单层级：将 Docker 环境、Sub-Store 和 Wallos 的一键部署
 #      完美合并到了主菜单「三、安装服务」选项中，逻辑更紧凑。
 #   2. 版本锁定：Wallos 默认部署版本变更为 2.36.2。
@@ -28,7 +28,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="vps-ge-v8"
+SCRIPT_VERSION="jddj-ge-v8"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -3246,7 +3246,7 @@ main_menu() {
 #  安装 jddj 快捷命令
 # ────────────────────────────────────────────────────────────────
 # 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vps-ge-v8.sh"
+JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v8.sh"
 
 install_self() {
     local target="/usr/bin/jddj"
