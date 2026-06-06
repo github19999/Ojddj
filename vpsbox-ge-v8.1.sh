@@ -11,6 +11,10 @@
 #   3. 统一管理：将拓展服务的维护面板合并入主菜单「五、服务管理」中。
 #   4. 稳定性保障：彻底修复了菜单跳转导致的包管理器环境变量丢失问题；
 #      确保原有的 sing-box、Nginx 回落及所有其他功能 100% 正常运行。
+#   5. Sub-Store 部署优化：增加版本选择（最新稳定版/指定版本/预发布版）；
+#      增加防重复误部署检测；在主菜单及服务管理中增加面板地址专有查看选项。
+#   6. Wallos 部署优化：彻底修复 Wallos 与 Sub-Store 绑定同一域名导致的
+#      Nginx 路由冲突问题，增加强验证拦截，强制要求域名隔离。
 # ================================================================
 
 # 遇到错误立即退出
@@ -935,6 +939,22 @@ install_docker_env() {
 }
 
 install_substore() {
+    # 【优化1】部署前进行检测，避免误操作导致重新部署覆盖
+    if [[ -d /root/docker/substore ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+        log_warn "检测到您的服务器中 Sub-Store 已经部署过了！"
+        if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+            local sn=$(cat /root/docker/substore/domain.txt)
+            local api=$(cat /root/docker/substore/api_path.txt)
+            echo ""
+            echo -e "  🌐 为您找回的面板访问地址: "
+            echo -e "  ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+            echo ""
+        fi
+        log_info "为防止您的数据由于误操作被覆盖，本次部署动作已被系统拦截取消。"
+        log_info "如确需重新部署或彻底删除旧数据，请前往「五、服务管理 -> 管理 Sub-Store」中操作。"
+        return
+    fi
+
     install_docker_env
     if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
@@ -944,6 +964,35 @@ install_substore() {
     log_step "部署 Sub-Store (订阅转换中心)"
     echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
     
+    # 【优化1】增加版本选择功能
+    echo ""
+    echo -e "${CYAN}请选择 Sub-Store 部署版本:${NC}"
+    echo "  1) 安装 Sub-Store 最新稳定版 [默认]"
+    echo "  2) 安装 Sub-Store 指定版本号"
+    echo "  3) 安装 Sub-Store 预发布版 (Beta)"
+    read -rp "请选择 (1-3) [默认 1]: " sub_ver_choice
+    sub_ver_choice=${sub_ver_choice:-1}
+
+    local backend_url="https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js"
+    local frontend_url="https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip"
+
+    if [[ "$sub_ver_choice" == "2" ]]; then
+        read -rp "请输入 Sub-Store 后端版本号 (例如 2.14.0): " target_ver
+        if [[ -n "$target_ver" ]]; then
+            backend_url="https://github.com/sub-store-org/Sub-Store/releases/download/${target_ver}/sub-store.bundle.js"
+        fi
+        read -rp "请输入 Sub-Store 前端版本号 (例如 1.0.0，直接回车则默认拉取最新稳定版): " target_fe_ver
+        if [[ -n "$target_fe_ver" ]]; then
+            frontend_url="https://github.com/sub-store-org/Sub-Store-Front-End/releases/download/${target_fe_ver}/dist.zip"
+        fi
+    elif [[ "$sub_ver_choice" == "3" ]]; then
+        log_info "正在获取 Github 预发布版(Beta) 的最新直链..."
+        local pre_back=$(curl -s https://api.github.com/repos/sub-store-org/Sub-Store/releases | grep '"browser_download_url":' | grep 'sub-store.bundle.js' | head -n 1 | cut -d '"' -f 4)
+        [[ -n "$pre_back" ]] && backend_url="$pre_back"
+        local pre_front=$(curl -s https://api.github.com/repos/sub-store-org/Sub-Store-Front-End/releases | grep '"browser_download_url":' | grep 'dist.zip' | head -n 1 | cut -d '"' -f 4)
+        [[ -n "$pre_front" ]] && frontend_url="$pre_front"
+    fi
+
     select_server_name "sub.example.com"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
@@ -963,9 +1012,9 @@ install_substore() {
     fi
     echo "$sn" > domain.txt
 
-    log_info "正在下载 Sub-Store 前后端核心代码..."
-    curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
-    curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
+    log_info "正在为您下载并部署选中版本的核心代码..."
+    curl -fsSL -L "$backend_url" -o sub-store.bundle.js
+    curl -fsSL -L "$frontend_url" -o dist.zip
     unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
 
     cat > docker-compose.yml <<EOF
@@ -1038,6 +1087,7 @@ EOF
     log_success "Sub-Store 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn/?api=https://$sn/$api_path${NC}"
     echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
+    echo -e "  ${YELLOW}（如果不慎忘记该地址，可在脚本主菜单的「服务管理」中随时找回查看）${NC}"
     echo ""
 }
 
@@ -1054,8 +1104,28 @@ install_wallos() {
     local wallos_ver
     ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
 
-    select_server_name "wallos.example.com"
-    local sn="$SELECTED_SN"
+    local sn=""
+    # 【优化2】强制排查 Wallos 域名是否与 Sub-Store 重复
+    while true; do
+        select_server_name "wallos.example.com"
+        sn="$SELECTED_SN"
+        
+        if [[ -f /root/docker/substore/domain.txt ]]; then
+            local sub_sn=$(cat /root/docker/substore/domain.txt)
+            if [[ "$sn" == "$sub_sn" ]]; then
+                echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名 ($sn) 已经被您部署的 Sub-Store 占用。${NC}"
+                echo -e "${YELLOW}由于 Nginx 根目录分配限制，Wallos 必须使用与 Sub-Store 不同的二级域名（例如 wallos.yourdomain.com）。${NC}"
+                echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
+                echo ""
+                if [[ "$AUTO_DEFAULT" == "true" ]]; then
+                    AUTO_DEFAULT=false # 取消可能导致无限循环的自动默认机制
+                fi
+                continue
+            fi
+        fi
+        break
+    done
+
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
 
@@ -2494,7 +2564,7 @@ menu_manage_substore() {
         if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
             local sn=$(cat /root/docker/substore/domain.txt)
             local api=$(cat /root/docker/substore/api_path.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+            echo -e "  快捷访问: ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
         fi
         echo ""
         echo "  1) 重新部署"
@@ -2504,6 +2574,7 @@ menu_manage_substore() {
         echo "  5) 自动更新 (拉取最新前后端代码并重启)"
         echo "  6) 实时查看日志 (Ctrl+C 退出)"
         echo "  7) 彻底删除及清理配置"
+        echo -e "  ${YELLOW}8) 查看访问面板地址 (找回链接)${NC}"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -2531,6 +2602,18 @@ menu_manage_substore() {
                     rm -f /etc/nginx/conf.d/substore.conf
                     systemctl reload nginx 2>/dev/null
                     log_success "已彻底删除 Sub-Store"
+                fi
+                press_enter ;;
+            8)
+                if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+                    local sn=$(cat /root/docker/substore/domain.txt)
+                    local api=$(cat /root/docker/substore/api_path.txt)
+                    echo ""
+                    echo -e "  🌐 ${BOLD}您的 Sub-Store 面板完整访问地址为:${NC}"
+                    echo -e "  ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+                    echo ""
+                else
+                    log_warn "未找到 Sub-Store 配置文件，请确认是否已成功部署。"
                 fi
                 press_enter ;;
             0) return ;;
