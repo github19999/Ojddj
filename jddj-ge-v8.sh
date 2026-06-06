@@ -3237,7 +3237,7 @@ main_menu() {
             5) menu_service ;;
             6) menu_links ;;
             7) detect_distro; run_all ;;
-            8) menu_other_tools ;;
+            8) detect_distro; menu_other_tools ;;
             0)
                 echo ""
                 echo -e "${GREEN}感谢使用，再见！${NC}"
