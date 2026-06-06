@@ -1,10 +1,10 @@
 #!/bin/bash
 # ================================================================
-#   服务器一键管理脚本 (vps)
-#   版本号：vps-ge-v8
+#   服务器一键管理脚本 (vpsbox)
+#   版本号：vpsbox-ge-v8.1
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
-# 【本次优化内容 (vps-ge-v8)】
+# 【本次优化内容 (vpsbox-ge-v8.1)】
 #   1. 重构菜单层级：将 Docker 环境、Sub-Store 和 Wallos 的一键部署
 #      完美合并到了主菜单「三、安装服务」选项中，逻辑更紧凑。
 #   2. 版本锁定：Wallos 默认部署版本变更为 2.36.2。
@@ -28,7 +28,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="vps-ge-v8"
+SCRIPT_VERSION="vpsbox-ge-v8.1"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -2396,7 +2396,7 @@ PYEOF
         fi
 
         local TMP_JSON
-        TMP_JSON=$(mktemp /tmp/vps_inbound_XXXXXX)
+        TMP_JSON=$(mktemp /tmp/vpsbox_inbound_XXXXXX)
         local INBOUNDS_JSON=""
         local first=true
 
@@ -3232,7 +3232,7 @@ main_menu() {
             0)
                 echo ""
                 echo -e "${GREEN}感谢使用，再见！${NC}"
-                echo -e "${YELLOW}提示：退出脚本后，随时可以输入快捷命令 ${BOLD}${GREEN}vps${NC}${YELLOW} 重新进入主菜单。${NC}"
+                echo -e "${YELLOW}提示：退出脚本后，随时可以输入快捷命令 ${BOLD}${GREEN}vpsbox${NC}${YELLOW} 重新进入主菜单。${NC}"
                 echo ""
                 exit 0 ;;
             *)
@@ -3243,10 +3243,10 @@ main_menu() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 vps 快捷命令
+#  安装 vpsbox 快捷命令
 # ────────────────────────────────────────────────────────────────
 # 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-vps_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ovps/main/vps-ge-v8.sh"
+vps_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ovps/main/vpsbox-ge-v8.1.sh"
 
 install_self() {
     local target="/usr/bin/vps"
@@ -3260,16 +3260,16 @@ install_self() {
 
     if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
         install -m 755 "$0" "$target" 2>/dev/null || true
-        log_success "已安装快捷命令: vps (本地复制)"
+        log_success "已安装快捷命令: vpsbox (本地复制)"
     else
-        if [[ -z "$vps_REMOTE_URL" || "$vps_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
-            log_warn "未配置真实的 vps_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
+        if [[ -z "$vpsbox_REMOTE_URL" || "$vpsbox_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
+            log_warn "未配置真实的 vpsbox_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
         else
-            if curl -fsSL --connect-timeout 5 --max-time 20 "$vps_REMOTE_URL" -o "$target" 2>/dev/null; then
+            if curl -fsSL --connect-timeout 5 --max-time 20 "$vpsbox_REMOTE_URL" -o "$target" 2>/dev/null; then
                 chmod 755 "$target" 2>/dev/null
-                log_success "已安装快捷命令: vps (远程同步)"
+                log_success "已安装快捷命令: vpsbox (远程同步)"
             else
-                log_warn "快捷命令远程同步失败，请检查网络或 vps_REMOTE_URL 是否正确。"
+                log_warn "快捷命令远程同步失败，请检查网络或 vpsbox_REMOTE_URL 是否正确。"
             fi
         fi
     fi
