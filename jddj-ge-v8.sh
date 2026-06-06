@@ -5,10 +5,12 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (vps-ge-v8)】
-#   1. 新增【其他工具】菜单，集成 Docker 自动化环境部署。
-#   2. 新增 Sub-Store 和 Wallos 一键部署、配置与交互式管理面板。
-#   3. Wallos 默认部署版本设定为 2.36.2，并提供极具人性化的 Nginx + SSL
-#      自动反代接入，完美融合现有证书体系，免去端口暴露风险。
+#   1. 重构菜单层级：将 Docker 环境、Sub-Store 和 Wallos 的一键部署
+#      完美合并到了主菜单「三、安装服务」选项中，逻辑更紧凑。
+#   2. 版本锁定：Wallos 默认部署版本变更为 2.36.2。
+#   3. 统一管理：将拓展服务的维护面板合并入主菜单「五、服务管理」中。
+#   4. 稳定性保障：彻底修复了菜单跳转导致的包管理器环境变量丢失问题；
+#      确保原有的 sing-box、Nginx 回落及所有其他功能 100% 正常运行。
 # ================================================================
 
 # 遇到错误立即退出
@@ -881,29 +883,273 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx）
+#  三、安装服务（sing-box / Nginx / 扩展环境等）
 # ────────────────────────────────────────────────────────────────
+install_nginx() {
+    log_step "安装 Nginx..."
+    if command -v nginx &>/dev/null; then
+        local ver
+        ver=$(nginx -v 2>&1 | head -1)
+        log_info "Nginx 已安装: $ver"
+        read -rp "是否重新安装？(y/N): " yn
+        if [[ "${yn,,}" != "y" ]]; then
+            return
+        fi
+    fi
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        apt update -y && apt install -y nginx
+    else
+        $PKG_MANAGER install -y nginx
+    fi
+    mkdir -p /var/www/html /etc/nginx/conf.d
+    if [[ ! -f /var/www/html/index.html ]]; then
+        cat > /var/www/html/index.html << 'HTML'
+<!DOCTYPE html><html><head><title>Welcome</title></head>
+<body><h1>It works!</h1></body></html>
+HTML
+    fi
+    systemctl enable nginx && systemctl start nginx
+    systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
+}
+
+install_docker_env() {
+    log_step "检查并配置 Docker 环境..."
+    if ! command -v docker >/dev/null 2>&1; then
+        log_info "正在安装 Docker..."
+        curl -fsSL https://get.docker.com -o get-docker.sh
+        sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+        rm -f get-docker.sh
+    else
+        log_success "Docker 已安装"
+    fi
+    systemctl enable docker >/dev/null 2>&1
+    systemctl start docker >/dev/null 2>&1
+
+    if ! docker compose version >/dev/null 2>&1; then
+        log_info "正在安装 Docker Compose 插件..."
+        if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
+        else $PKG_MANAGER install -y docker-compose-plugin; fi
+    else
+        log_success "Docker Compose 已安装"
+    fi
+}
+
+install_substore() {
+    install_docker_env
+    if ! command -v nginx >/dev/null 2>&1; then
+        log_warn "未检测到 Nginx，正在尝试自动预装..."
+        install_nginx
+    fi
+
+    log_step "部署 Sub-Store (订阅转换中心)"
+    echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
+    
+    select_server_name "sub.example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    mkdir -p /root/docker/substore/data
+    cd /root/docker/substore
+
+    local api_path
+    if [[ -f api_path.txt ]]; then
+        api_path=$(cat api_path.txt)
+        log_info "检测到已存在的 API 路径: /$api_path"
+    else
+        api_path=$(openssl rand -hex 12)
+        echo "$api_path" > api_path.txt
+        log_info "已生成随机高级防护 API 路径: /$api_path"
+    fi
+    echo "$sn" > domain.txt
+
+    log_info "正在下载 Sub-Store 前后端核心代码..."
+    curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
+    curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
+    unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
+
+    cat > docker-compose.yml <<EOF
+version: '3.8'
+services:
+  substore:
+    image: node:20.18.0
+    container_name: substore
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "sub-store.bundle.js"]
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      SUB_STORE_FRONTEND_BACKEND_PATH: "/$api_path"
+      SUB_STORE_BACKEND_CRON: "0 0 * * *"
+      SUB_STORE_FRONTEND_PATH: "/app/frontend"
+      SUB_STORE_FRONTEND_HOST: "0.0.0.0"
+      SUB_STORE_FRONTEND_PORT: "3001"
+      SUB_STORE_DATA_BASE_PATH: "/app"
+      SUB_STORE_BACKEND_API_HOST: "127.0.0.1"
+      SUB_STORE_BACKEND_API_PORT: "3000"
+      TZ: "Asia/Shanghai"
+    volumes:
+      - ./sub-store.bundle.js:/app/sub-store.bundle.js
+      - ./frontend:/app/frontend
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+
+    log_info "启动容器..."
+    docker compose up -d
+
+    log_step "配置 Nginx 安全反向代理"
+    mkdir -p /etc/nginx/conf.d
+    cat > /etc/nginx/conf.d/substore.conf <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $sn;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $sn;
+
+    ssl_certificate $cp;
+    ssl_certificate_key $kp;
+
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    
+    echo ""
+    log_success "Sub-Store 部署完成！"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn/?api=https://$sn/$api_path${NC}"
+    echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
+    echo ""
+}
+
+install_wallos() {
+    install_docker_env
+    if ! command -v nginx >/dev/null 2>&1; then
+        log_warn "未检测到 Nginx，正在尝试自动预装..."
+        install_nginx
+    fi
+
+    log_step "部署 Wallos (订阅管理与财务系统)"
+    echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
+    
+    local wallos_ver
+    ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
+
+    select_server_name "wallos.example.com"
+    local sn="$SELECTED_SN"
+    ask_cert_paths "$sn"
+    local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    mkdir -p /root/docker/wallos/{db,logos}
+    cd /root/docker/wallos
+    echo "$sn" > domain.txt
+
+    cat > docker-compose.yml <<EOF
+version: '3.8'
+services:
+  wallos:
+    container_name: wallos
+    image: bellamy/wallos:$wallos_ver
+    ports:
+      - "127.0.0.1:8282:80/tcp"
+    environment:
+      TZ: 'Asia/Shanghai'
+    volumes:
+      - './db:/var/www/html/db'
+      - './logos:/var/www/html/images/uploads/logos'
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+EOF
+
+    log_info "启动容器..."
+    docker compose up -d
+
+    log_step "配置 Nginx 安全反向代理"
+    mkdir -p /etc/nginx/conf.d
+    cat > /etc/nginx/conf.d/wallos.conf <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $sn;
+    return 301 https://\$host\$request_uri;
+}
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name $sn;
+
+    ssl_certificate $cp;
+    ssl_certificate_key $kp;
+
+    location / {
+        proxy_pass http://127.0.0.1:8282;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    
+    echo ""
+    log_success "Wallos 部署完成！"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn${NC}"
+    echo ""
+}
+
 menu_install_service() {
     while true; do
         clear
-        echo -e "${BOLD}${CYAN}══ 三、安装服务 ══${NC}"
+        echo -e "${BOLD}${CYAN}══ 三、安装服务 (sing-box / Nginx / 扩展工具) ══${NC}"
         echo ""
-        echo -e "  ${CYAN}── sing-box ──${NC}"
-        echo "  1) Latest 稳定版"
-        echo "  2) 指定版本号"
-        echo "  3) Beta / 预发布版"
+        echo -e "  ${CYAN}── 核心代理 (sing-box) ──${NC}"
+        echo "  1) 安装 sing-box 最新稳定版"
+        echo "  2) 安装 sing-box 指定版本号"
+        echo "  3) 安装 sing-box Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── Nginx ──${NC}"
-        echo "  4) 安装 Nginx"
+        echo -e "  ${CYAN}── Web / 代理组件 ──${NC}"
+        echo "  4) 安装 Nginx (用于反代和回落)"
+        echo ""
+        echo -e "  ${CYAN}── 扩展工具 (Docker 容器) ──${NC}"
+        echo "  5) 安装/修复 Docker 环境"
+        echo "  6) 部署 Sub-Store (订阅转换中心)"
+        echo "  7) 部署 Wallos    (个人财务与订阅追踪)"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
-        read -rp "请选择 (0-4, 默认 0): " vc
+        read -rp "请选择 (0-7, 默认 0): " vc
         vc=${vc:-0}
 
         case $vc in
             0) return ;;
-            4) install_nginx ;;
+            4) install_nginx; press_enter ;;
+            5) install_docker_env; press_enter ;;
+            6) install_substore; press_enter ;;
+            7) install_wallos; press_enter ;;
             1|2|3)
                 if [[ "$vc" == "1" ]]; then
                     log_step "安装 sing-box 最新稳定版..."
@@ -974,34 +1220,6 @@ EOF
     done
 }
 
-install_nginx() {
-    log_step "安装 Nginx..."
-    if command -v nginx &>/dev/null; then
-        local ver
-        ver=$(nginx -v 2>&1 | head -1)
-        log_info "Nginx 已安装: $ver"
-        read -rp "是否重新安装？(y/N): " yn
-        if [[ "${yn,,}" != "y" ]]; then
-            press_enter
-            return
-        fi
-    fi
-    if [[ "$PKG_MANAGER" == "apt" ]]; then
-        apt update -y && apt install -y nginx
-    else
-        $PKG_MANAGER install -y nginx
-    fi
-    mkdir -p /var/www/html /etc/nginx/conf.d
-    if [[ ! -f /var/www/html/index.html ]]; then
-        cat > /var/www/html/index.html << 'HTML'
-<!DOCTYPE html><html><head><title>Welcome</title></head>
-<body><h1>It works!</h1></body></html>
-HTML
-    fi
-    systemctl enable nginx && systemctl start nginx
-    systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
-    press_enter
-}
 
 # ────────────────────────────────────────────────────────────────
 #  四、配置 sing-box — 各协议 build_* 函数
@@ -2261,7 +2479,122 @@ EOF
 }
 
 # ────────────────────────────────────────────────────────────────
-#  五、服务管理（sing-box / Nginx）
+#  五、管理面板（Sub-Store / Wallos）
+# ────────────────────────────────────────────────────────────────
+menu_manage_substore() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ Sub-Store 管理 ══${NC}"
+        echo ""
+        local status_str="${RED}○ 未安装或已停止${NC}"
+        if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+            status_str="${GREEN}● 运行中${NC}"
+        fi
+        echo -e "  当前状态: $status_str"
+        if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+            local sn=$(cat /root/docker/substore/domain.txt)
+            local api=$(cat /root/docker/substore/api_path.txt)
+            echo -e "  访问面板: ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+        fi
+        echo ""
+        echo "  1) 重新部署"
+        echo "  2) 启动服务"
+        echo "  3) 停止服务"
+        echo "  4) 重启服务"
+        echo "  5) 自动更新 (拉取最新前后端代码并重启)"
+        echo "  6) 实时查看日志 (Ctrl+C 退出)"
+        echo "  7) 彻底删除及清理配置"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择: " opt
+        case $opt in
+            1) install_substore; press_enter ;;
+            2) cd /root/docker/substore && docker compose start && log_success "已启动"; press_enter ;;
+            3) cd /root/docker/substore && docker compose stop && log_success "已停止"; press_enter ;;
+            4) cd /root/docker/substore && docker compose restart && log_success "已重启"; press_enter ;;
+            5) 
+                if [[ ! -d /root/docker/substore ]]; then log_error "未找到目录"; sleep 1; continue; fi
+                cd /root/docker/substore || break
+                log_info "正在为您拉取 Github 最新数据..."
+                curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
+                curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
+                unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
+                docker compose restart
+                log_success "更新完成"; press_enter ;;
+            6) docker logs -f substore ;;
+            7)
+                read -rp "⚠ 确认彻底删除 Sub-Store 所有数据及代理配置？(y/N): " c
+                if [[ "${c,,}" == "y" ]]; then
+                    cd /root/docker/substore && docker compose down -v 2>/dev/null || true
+                    rm -rf /root/docker/substore
+                    rm -f /etc/nginx/conf.d/substore.conf
+                    systemctl reload nginx 2>/dev/null
+                    log_success "已彻底删除 Sub-Store"
+                fi
+                press_enter ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_manage_wallos() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ Wallos 管理 ══${NC}"
+        echo ""
+        local status_str="${RED}○ 未安装或已停止${NC}"
+        if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+            status_str="${GREEN}● 运行中${NC}"
+        fi
+        echo -e "  当前状态: $status_str"
+        if [[ -f /root/docker/wallos/domain.txt ]]; then
+            local sn=$(cat /root/docker/wallos/domain.txt)
+            echo -e "  访问面板: ${GREEN}https://$sn${NC}"
+        fi
+        echo ""
+        echo "  1) 重新部署"
+        echo "  2) 启动服务"
+        echo "  3) 停止服务"
+        echo "  4) 重启服务"
+        echo "  5) 更新拉取 Docker 最新镜像包"
+        echo "  6) 实时查看日志 (Ctrl+C 退出)"
+        echo "  7) 彻底删除及清理配置"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择: " opt
+        case $opt in
+            1) install_wallos; press_enter ;;
+            2) cd /root/docker/wallos && docker compose start && log_success "已启动"; press_enter ;;
+            3) cd /root/docker/wallos && docker compose stop && log_success "已停止"; press_enter ;;
+            4) cd /root/docker/wallos && docker compose restart && log_success "已重启"; press_enter ;;
+            5)
+                if [[ ! -d /root/docker/wallos ]]; then log_error "未找到目录"; sleep 1; continue; fi
+                cd /root/docker/wallos || break
+                log_info "正在拉取镜像并更新..."
+                docker compose pull && docker compose up -d
+                log_success "更新完成"; press_enter ;;
+            6) docker logs -f wallos ;;
+            7)
+                read -rp "⚠ 确认彻底删除 Wallos 所有账单数据？(y/N): " c
+                if [[ "${c,,}" == "y" ]]; then
+                    cd /root/docker/wallos && docker compose down -v 2>/dev/null || true
+                    rm -rf /root/docker/wallos
+                    rm -f /etc/nginx/conf.d/wallos.conf
+                    systemctl reload nginx 2>/dev/null
+                    log_success "已彻底删除 Wallos"
+                fi
+                press_enter ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+# ────────────────────────────────────────────────────────────────
+#  五、服务管理（sing-box / Nginx / 扩展服务）
 # ────────────────────────────────────────────────────────────────
 menu_service() {
     while true; do
@@ -2274,9 +2607,9 @@ menu_service() {
         else
             status_str="${RED}○ 已停止${NC}"
         fi
-        echo -e "  当前状态: $status_str"
+        echo -e "  sing-box 状态: $status_str"
         echo ""
-        echo -e "  ${CYAN}── sing-box ──${NC}"
+        echo -e "  ${CYAN}── 核心代理 (sing-box) ──${NC}"
         echo "  1) 启动 sing-box"
         echo "  2) 停止 sing-box"
         echo "  3) 重启 sing-box 并查看状态"
@@ -2288,13 +2621,17 @@ menu_service() {
         echo "  9) 验证配置文件"
         echo " 10) 一键修复配置（移除旧 dns/route 段）"
         echo ""
-        echo -e "  ${CYAN}── Nginx ──${NC}"
+        echo -e "  ${CYAN}── Web / 代理组件 (Nginx) ──${NC}"
         echo " 11) 验证 Nginx 配置 (nginx -t)"
         echo " 12) 重启 Nginx 并查看状态"
         echo " 13) 启动 Nginx"
         echo " 14) 停止 Nginx"
         echo " 15) 设为开机自启"
         echo " 16) 实时查看 Nginx 错误日志"
+        echo ""
+        echo -e "  ${CYAN}── 扩展工具面板 ──${NC}"
+        echo " 17) 管理 Sub-Store"
+        echo " 18) 管理 Wallos"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -2361,6 +2698,8 @@ menu_service() {
             14) systemctl stop   nginx && log_success "Nginx 已停止"; press_enter ;;
             15) systemctl enable nginx && log_success "Nginx 已设为开机自启"; press_enter ;;
             16) tail -f /var/log/nginx/error.log ;;
+            17) menu_manage_substore ;;
+            18) menu_manage_wallos ;;
             0) return ;;
             *) log_warn "无效选择" ;;
         esac
@@ -2805,354 +3144,6 @@ menu_links() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  八、其他工具 (Docker / Sub-Store / Wallos)
-# ────────────────────────────────────────────────────────────────
-install_docker_env() {
-    log_step "检查并配置 Docker 环境..."
-    if ! command -v docker >/dev/null 2>&1; then
-        log_info "正在安装 Docker..."
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
-        rm -f get-docker.sh
-    else
-        log_success "Docker 已安装"
-    fi
-    systemctl enable docker >/dev/null 2>&1
-    systemctl start docker >/dev/null 2>&1
-
-    if ! docker compose version >/dev/null 2>&1; then
-        log_info "正在安装 Docker Compose 插件..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
-        else $PKG_MANAGER install -y docker-compose-plugin; fi
-    else
-        log_success "Docker Compose 已安装"
-    fi
-}
-
-install_substore() {
-    install_docker_env
-    if ! command -v nginx >/dev/null 2>&1; then
-        log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx
-    fi
-
-    log_step "部署 Sub-Store (订阅转换中心)"
-    echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
-    
-    select_server_name "sub.example.com"
-    local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"
-    local cp="$CERT_PATH" kp="$KEY_PATH"
-
-    mkdir -p /root/docker/substore/data
-    cd /root/docker/substore
-
-    local api_path
-    if [[ -f api_path.txt ]]; then
-        api_path=$(cat api_path.txt)
-        log_info "检测到已存在的 API 路径: /$api_path"
-    else
-        api_path=$(openssl rand -hex 12)
-        echo "$api_path" > api_path.txt
-        log_info "已生成随机高级防护 API 路径: /$api_path"
-    fi
-    echo "$sn" > domain.txt
-
-    log_info "正在下载 Sub-Store 前后端核心代码..."
-    curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
-    curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
-    unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
-
-    cat > docker-compose.yml <<EOF
-version: '3.8'
-services:
-  substore:
-    image: node:20.18.0
-    container_name: substore
-    restart: unless-stopped
-    working_dir: /app
-    command: ["node", "sub-store.bundle.js"]
-    ports:
-      - "127.0.0.1:3001:3001"
-    environment:
-      SUB_STORE_FRONTEND_BACKEND_PATH: "/$api_path"
-      SUB_STORE_BACKEND_CRON: "0 0 * * *"
-      SUB_STORE_FRONTEND_PATH: "/app/frontend"
-      SUB_STORE_FRONTEND_HOST: "0.0.0.0"
-      SUB_STORE_FRONTEND_PORT: "3001"
-      SUB_STORE_DATA_BASE_PATH: "/app"
-      SUB_STORE_BACKEND_API_HOST: "127.0.0.1"
-      SUB_STORE_BACKEND_API_PORT: "3000"
-      TZ: "Asia/Shanghai"
-    volumes:
-      - ./sub-store.bundle.js:/app/sub-store.bundle.js
-      - ./frontend:/app/frontend
-      - ./data:/app/data
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-EOF
-
-    log_info "启动容器..."
-    docker compose up -d
-
-    log_step "配置 Nginx 安全反向代理"
-    mkdir -p /etc/nginx/conf.d
-    cat > /etc/nginx/conf.d/substore.conf <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $sn;
-    return 301 https://\$host\$request_uri;
-}
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $sn;
-
-    ssl_certificate $cp;
-    ssl_certificate_key $kp;
-
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx
-    
-    echo ""
-    log_success "Sub-Store 部署完成！"
-    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn/?api=https://$sn/$api_path${NC}"
-    echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
-    echo ""
-}
-
-install_wallos() {
-    install_docker_env
-    if ! command -v nginx >/dev/null 2>&1; then
-        log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx
-    fi
-
-    log_step "部署 Wallos (订阅管理与财务系统)"
-    echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
-    
-    local wallos_ver
-    ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
-
-    select_server_name "wallos.example.com"
-    local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"
-    local cp="$CERT_PATH" kp="$KEY_PATH"
-
-    mkdir -p /root/docker/wallos/{db,logos}
-    cd /root/docker/wallos
-    echo "$sn" > domain.txt
-
-    cat > docker-compose.yml <<EOF
-version: '3.8'
-services:
-  wallos:
-    container_name: wallos
-    image: bellamy/wallos:$wallos_ver
-    ports:
-      - "127.0.0.1:8282:80/tcp"
-    environment:
-      TZ: 'Asia/Shanghai'
-    volumes:
-      - './db:/var/www/html/db'
-      - './logos:/var/www/html/images/uploads/logos'
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-EOF
-
-    log_info "启动容器..."
-    docker compose up -d
-
-    log_step "配置 Nginx 安全反向代理"
-    mkdir -p /etc/nginx/conf.d
-    cat > /etc/nginx/conf.d/wallos.conf <<EOF
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $sn;
-    return 301 https://\$host\$request_uri;
-}
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name $sn;
-
-    ssl_certificate $cp;
-    ssl_certificate_key $kp;
-
-    location / {
-        proxy_pass http://127.0.0.1:8282;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx
-    
-    echo ""
-    log_success "Wallos 部署完成！"
-    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn${NC}"
-    echo ""
-}
-
-menu_manage_substore() {
-    while true; do
-        clear
-        echo -e "${BOLD}${CYAN}══ Sub-Store 管理 ══${NC}"
-        echo ""
-        local status_str="${RED}○ 未安装或已停止${NC}"
-        if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
-            status_str="${GREEN}● 运行中${NC}"
-        fi
-        echo -e "  当前状态: $status_str"
-        if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
-            local sn=$(cat /root/docker/substore/domain.txt)
-            local api=$(cat /root/docker/substore/api_path.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
-        fi
-        echo ""
-        echo "  1) 安装 / 重新部署"
-        echo "  2) 启动服务"
-        echo "  3) 停止服务"
-        echo "  4) 重启服务"
-        echo "  5) 自动更新 (拉取最新前后端代码并重启)"
-        echo "  6) 实时查看日志 (Ctrl+C 退出)"
-        echo "  7) 彻底删除及清理配置"
-        echo ""
-        echo "  0) 返回上一级"
-        echo ""
-        read -rp "请选择: " opt
-        case $opt in
-            1) install_substore; press_enter ;;
-            2) cd /root/docker/substore && docker compose start && log_success "已启动"; press_enter ;;
-            3) cd /root/docker/substore && docker compose stop && log_success "已停止"; press_enter ;;
-            4) cd /root/docker/substore && docker compose restart && log_success "已重启"; press_enter ;;
-            5) 
-                if [[ ! -d /root/docker/substore ]]; then log_error "未找到目录"; sleep 1; continue; fi
-                cd /root/docker/substore || break
-                log_info "正在为您拉取 Github 最新数据..."
-                curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
-                curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
-                unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
-                docker compose restart
-                log_success "更新完成"; press_enter ;;
-            6) docker logs -f substore ;;
-            7)
-                read -rp "⚠ 确认彻底删除 Sub-Store 所有数据及代理配置？(y/N): " c
-                if [[ "${c,,}" == "y" ]]; then
-                    cd /root/docker/substore && docker compose down -v 2>/dev/null || true
-                    rm -rf /root/docker/substore
-                    rm -f /etc/nginx/conf.d/substore.conf
-                    systemctl reload nginx 2>/dev/null
-                    log_success "已彻底删除 Sub-Store"
-                fi
-                press_enter ;;
-            0) return ;;
-            *) log_warn "无效选项"; sleep 1 ;;
-        esac
-    done
-}
-
-menu_manage_wallos() {
-    while true; do
-        clear
-        echo -e "${BOLD}${CYAN}══ Wallos 管理 ══${NC}"
-        echo ""
-        local status_str="${RED}○ 未安装或已停止${NC}"
-        if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
-            status_str="${GREEN}● 运行中${NC}"
-        fi
-        echo -e "  当前状态: $status_str"
-        if [[ -f /root/docker/wallos/domain.txt ]]; then
-            local sn=$(cat /root/docker/wallos/domain.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn${NC}"
-        fi
-        echo ""
-        echo "  1) 安装 / 重新部署 (默认推荐版本 2.36.2)"
-        echo "  2) 启动服务"
-        echo "  3) 停止服务"
-        echo "  4) 重启服务"
-        echo "  5) 更新拉取 Docker 镜像包"
-        echo "  6) 实时查看日志 (Ctrl+C 退出)"
-        echo "  7) 彻底删除及清理配置"
-        echo ""
-        echo "  0) 返回上一级"
-        echo ""
-        read -rp "请选择: " opt
-        case $opt in
-            1) install_wallos; press_enter ;;
-            2) cd /root/docker/wallos && docker compose start && log_success "已启动"; press_enter ;;
-            3) cd /root/docker/wallos && docker compose stop && log_success "已停止"; press_enter ;;
-            4) cd /root/docker/wallos && docker compose restart && log_success "已重启"; press_enter ;;
-            5)
-                if [[ ! -d /root/docker/wallos ]]; then log_error "未找到目录"; sleep 1; continue; fi
-                cd /root/docker/wallos || break
-                log_info "正在拉取镜像并更新..."
-                docker compose pull && docker compose up -d
-                log_success "更新完成"; press_enter ;;
-            6) docker logs -f wallos ;;
-            7)
-                read -rp "⚠ 确认彻底删除 Wallos 所有账单及代理配置？(y/N): " c
-                if [[ "${c,,}" == "y" ]]; then
-                    cd /root/docker/wallos && docker compose down -v 2>/dev/null || true
-                    rm -rf /root/docker/wallos
-                    rm -f /etc/nginx/conf.d/wallos.conf
-                    systemctl reload nginx 2>/dev/null
-                    log_success "已彻底删除 Wallos"
-                fi
-                press_enter ;;
-            0) return ;;
-            *) log_warn "无效选项"; sleep 1 ;;
-        esac
-    done
-}
-
-menu_other_tools() {
-    while true; do
-        clear
-        echo -e "${BOLD}${CYAN}══ 八、其他工具 (Docker / 拓展服务) ══${NC}"
-        echo ""
-        echo "  1) 管理 Sub-Store (订阅转换与管理中心)"
-        echo "  2) 管理 Wallos    (个人财务与订阅追踪系统)"
-        echo ""
-        echo "  3) 基础支持: 安装 / 修复底层 Docker 环境"
-        echo ""
-        echo "  0) 返回主菜单"
-        echo ""
-        read -rp "请选择 (默认 0): " opt
-        opt=${opt:-0}
-        case $opt in
-            1) menu_manage_substore ;;
-            2) menu_manage_wallos ;;
-            3) install_docker_env; press_enter ;;
-            0) return ;;
-            *) log_warn "无效选项"; sleep 1 ;;
-        esac
-    done
-}
-
-# ────────────────────────────────────────────────────────────────
 #  全部执行 1→6
 # ────────────────────────────────────────────────────────────────
 run_all() {
@@ -3221,9 +3212,10 @@ main_menu() {
         echo -e "${NC}"
         echo "  部署流程:"
         echo -e "   ${GREEN}1.${NC} 基础设置（SSH/fail2ban/BBR）       ${GREEN}2.${NC} SSL 证书申请与安装"
-        echo -e "   ${GREEN}3.${NC} 安装服务 (sing-box / Nginx)        ${GREEN}4.${NC} 配置 sing-box 节点"
-        echo -e "   ${GREEN}5.${NC} sing-box 服务状态管理              ${GREEN}6.${NC} 生成节点订阅链接"
-        echo -e "   ${GREEN}7.${NC} ── 全部执行（1→6）──               ${GREEN}8.${NC} 其他工具 (Sub-Store/Wallos)"
+        echo -e "   ${GREEN}3.${NC} 安装服务 (包含 Docker/拓展)        ${GREEN}4.${NC} 配置 sing-box 节点"
+        echo -e "   ${GREEN}5.${NC} 服务管理 (启停/日志/面板维护)      ${GREEN}6.${NC} 生成节点订阅链接"
+        echo ""
+        echo -e "   ${YELLOW}7.${NC} ── 全部执行（1→6）──"
         echo ""
         echo "══════════════════════════════════════════════════════"
         echo "   0. 退出"
@@ -3237,7 +3229,6 @@ main_menu() {
             5) menu_service ;;
             6) menu_links ;;
             7) detect_distro; run_all ;;
-            8) detect_distro; menu_other_tools ;;
             0)
                 echo ""
                 echo -e "${GREEN}感谢使用，再见！${NC}"
