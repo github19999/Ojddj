@@ -12,6 +12,8 @@
 #      错误导致 [endpoints] 表头残留的致命 Bug，实现干净的精准删除。
 #   4. 稳定继承：保留了 v8.1 的所有防冲突(Nginx 8080/8443)、依赖防漏(unzip)
 #      和 Sub-Store/Wallos 的所有核心部署与防误触特性，安全稳定无损。
+#   5. 交互格式优化：严格按照要求重新排版了 sing-box 配置菜单的
+#      「旧节点导入」交互提示，增加空行分隔，确保任何时候格式绝对统一。
 # ================================================================
 
 # 遇到错误立即退出
@@ -2420,8 +2422,11 @@ configure_singbox() {
 
         if [[ "$has_old_data" == "true" ]]; then
             echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
+            echo ""
             echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
+            echo ""
             echo -e "  2) 保持现有旧节点数据，直接进入配置 [默认]"
+            echo ""
             read -rp "请选择 (1-2, 默认 2): " import_choice
             import_choice=${import_choice:-2}
             if [[ "$import_choice" == "1" ]]; then
@@ -2429,9 +2434,13 @@ configure_singbox() {
             fi
         elif [[ "$has_local_sub" == "true" ]]; then
             echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
+            echo ""
             echo -e "  1) 自动读取并导入本地旧节点数据 [默认]"
+            echo ""
             echo -e "  2) 手动粘贴导入其他旧节点链接"
+            echo ""
             echo -e "  3) 否，生成全新配置 (随机生成)"
+            echo ""
             read -rp "请选择 (1-3, 默认 1): " import_choice
             import_choice=${import_choice:-1}
             if [[ "$import_choice" == "1" ]]; then
@@ -2442,8 +2451,11 @@ configure_singbox() {
             fi
         else
             echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
+            echo ""
             echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
+            echo ""
             echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
+            echo ""
             read -rp "请选择 (1-2, 默认 2): " import_choice
             import_choice=${import_choice:-2}
             if [[ "$import_choice" == "1" ]]; then
@@ -2453,7 +2465,8 @@ configure_singbox() {
 
         if [[ "$need_parse" == "true" ]]; then
             if [[ ! -s "$links_file" ]]; then
-                echo -e "\n${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
+                echo ""
+                echo -e "${YELLOW}请粘贴旧节点链接内容（粘贴完毕后，新起一行输入 EOF 并回车）：${NC}"
                 while IFS= read -r line; do
                     [[ "$line" == "EOF" ]] && break
                     echo "$line" >> "$links_file"
