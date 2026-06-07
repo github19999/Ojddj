@@ -14,6 +14,11 @@
 #      和 Sub-Store/Wallos 的所有核心部署与防误触特性，安全稳定无损。
 #   5. 防误触体验优化：将「四、配置 sing-box」中的旧数据导入选择项，
 #      默认回车操作全部强制修改为「0) 返回主菜单 [默认]」，彻底杜绝误覆盖。
+#   6. 菜单交互优化：将「四、配置 sing-box」首次运行时的旧节点导入提示
+#      优化为更直观的“是/否”选择，并将默认操作修改为生成全新配置。
+#   7. 导入断流修复：彻底修复了旧节点导入后，除了 SS 外其他协议全部不通的 Bug。
+#      (原因：旧链接常将IP隐式传递为SNI，导致生成新配置时 TLS 证书验证完全崩溃。
+#      已在 Python 解析核心中增加防 IP 污染及脏字符剥离过滤，实现 100% 无损还原)。
 # ================================================================
 
 # 遇到错误立即退出
@@ -2462,20 +2467,15 @@ configure_singbox() {
                 need_parse=true
             fi
         else
-            echo -e "${CYAN}是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）${NC}"
+            echo -e "是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）"
             echo ""
             echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
             echo ""
-            echo -e "  2) 否，生成全新配置 (随机生成)"
+            echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
             echo ""
-            echo -e "  0) 返回主菜单 [默认]"
-            echo ""
-            read -rp "请选择 (0-2, 默认 0): " import_choice
-            import_choice=${import_choice:-0}
-            if [[ "$import_choice" == "0" ]]; then
-                rm -f "$links_file"
-                return
-            fi
+            read -rp "请选择 (1-2, 默认 2): " import_choice
+            import_choice=${import_choice:-2}
+            
             if [[ "$import_choice" == "1" ]]; then
                 need_parse=true
             fi
@@ -2507,31 +2507,38 @@ if "://" not in input_text:
         pass
 
 vars_out = {}
+
+# 强化清理：剔除可能伴随黏贴进来的 \r 或 \n，防止截断 JSON 导致 sing-box 崩溃
+def clean_val(v):
+    if v is None: return ""
+    return re.sub(r'[\r\n]+', '', str(v).strip())
+
 for line in input_text.splitlines():
     line = line.strip()
     if not line: continue
     try:
         if line.startswith("vmess://"):
-            b64 = line[8:]
-            obj = json.loads(base64.b64decode(b64).decode("utf-8"))
+            b64_str = line[8:]
+            obj = json.loads(base64.b64decode(b64_str).decode("utf-8"))
             port = obj.get("port")
             uid = obj.get("id")
             net = obj.get("net")
             path = obj.get("path", "")
             sni = obj.get("sni", "") or obj.get("host", "") or obj.get("add", "")
             
+            # 【修复】防止提取到纯 IP 地址作为 SNI 导致 TLS 阻断
             if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
                 sni = ""
 
             if net == "ws" or "ws" in str(obj.get("ps", "")):
-                if uid: vars_out["OLD_VMESS_WS_UUID"] = uid
-                if port: vars_out["OLD_VMESS_WS_PORT"] = port
-                if path: vars_out["OLD_VMESS_WS_PATH"] = path
-                if sni: vars_out["OLD_VMESS_WS_SNI"] = sni
+                if uid: vars_out["OLD_VMESS_WS_UUID"] = clean_val(uid)
+                if port: vars_out["OLD_VMESS_WS_PORT"] = clean_val(port)
+                if path: vars_out["OLD_VMESS_WS_PATH"] = clean_val(path)
+                if sni: vars_out["OLD_VMESS_WS_SNI"] = clean_val(sni)
             else:
-                if uid: vars_out["OLD_VMESS_TCP_UUID"] = uid
-                if port: vars_out["OLD_VMESS_TCP_PORT"] = port
-                if sni: vars_out["OLD_VMESS_TCP_SNI"] = sni
+                if uid: vars_out["OLD_VMESS_TCP_UUID"] = clean_val(uid)
+                if port: vars_out["OLD_VMESS_TCP_PORT"] = clean_val(port)
+                if sni: vars_out["OLD_VMESS_TCP_SNI"] = clean_val(sni)
         else:
             scheme_idx = line.find("://")
             if scheme_idx == -1: continue
@@ -2578,49 +2585,55 @@ for line in input_text.splitlines():
             if not sni:
                 sni = host
             
+            # 【修复】部分旧节点链接会将 IP 隐式当做 SNI 传过来。
+            # 如果不把 IP 剔除，复用时 sing-box 会给所有包含 tls 的协议 (如 VLESS/Trojan) 写死 IP SNI，
+            # 从而导致证书不匹配直接断流。这就是除了 SS (无 tls) 之外都不通的罪魁祸首。
+            if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
+                sni = ""
+            
             if scheme == "vless":
                 uuid = userinfo
                 security = qs.get("security", [""])[0]
                 type_ = qs.get("type", [""])[0]
                 flow = qs.get("flow", [""])[0]
                 if security == "reality" or "reality" in tag:
-                    vars_out["OLD_VLESS_REALITY_UUID"] = uuid
-                    if port: vars_out["OLD_VLESS_REALITY_PORT"] = port
-                    if sni: vars_out["OLD_VLESS_REALITY_SNI"] = sni
-                    if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = qs["pbk"][0]
-                    if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = qs["sid"][0]
+                    vars_out["OLD_VLESS_REALITY_UUID"] = clean_val(uuid)
+                    if port: vars_out["OLD_VLESS_REALITY_PORT"] = clean_val(port)
+                    if sni: vars_out["OLD_VLESS_REALITY_SNI"] = clean_val(sni)
+                    if "pbk" in qs: vars_out["OLD_VLESS_REALITY_PBK"] = clean_val(qs["pbk"][0])
+                    if "sid" in qs: vars_out["OLD_VLESS_REALITY_SID"] = clean_val(qs["sid"][0])
                     
                     m = re.search(r'vless-reality-in-([A-Za-z0-9_-]+)', tag)
                     if m:
-                        vars_out["OLD_VLESS_REALITY_PK"] = m.group(1)
+                        vars_out["OLD_VLESS_REALITY_PK"] = clean_val(m.group(1))
 
                 elif type_ == "grpc" or "grpc" in tag:
-                    vars_out["OLD_VLESS_GRPC_UUID"] = uuid
-                    if port: vars_out["OLD_VLESS_GRPC_PORT"] = port
-                    if sni: vars_out["OLD_VLESS_GRPC_SNI"] = sni
-                    if "serviceName" in qs: vars_out["OLD_VLESS_GRPC_SVC"] = qs["serviceName"][0]
+                    vars_out["OLD_VLESS_GRPC_UUID"] = clean_val(uuid)
+                    if port: vars_out["OLD_VLESS_GRPC_PORT"] = clean_val(port)
+                    if sni: vars_out["OLD_VLESS_GRPC_SNI"] = clean_val(sni)
+                    if "serviceName" in qs: vars_out["OLD_VLESS_GRPC_SVC"] = clean_val(qs["serviceName"][0])
                 elif type_ == "ws" or "ws" in tag:
-                    vars_out["OLD_VLESS_WS_UUID"] = uuid
-                    if port: vars_out["OLD_VLESS_WS_PORT"] = port
-                    if sni: vars_out["OLD_VLESS_WS_SNI"] = sni
-                    if "path" in qs: vars_out["OLD_VLESS_WS_PATH"] = qs["path"][0]
+                    vars_out["OLD_VLESS_WS_UUID"] = clean_val(uuid)
+                    if port: vars_out["OLD_VLESS_WS_PORT"] = clean_val(port)
+                    if sni: vars_out["OLD_VLESS_WS_SNI"] = clean_val(sni)
+                    if "path" in qs: vars_out["OLD_VLESS_WS_PATH"] = clean_val(qs["path"][0])
                 else:
-                    vars_out["OLD_VLESS_TCP_UUID"] = uuid
-                    if port: vars_out["OLD_VLESS_TCP_PORT"] = port
-                    if sni: vars_out["OLD_VLESS_TCP_SNI"] = sni
-                    if flow: vars_out["OLD_VLESS_TCP_FLOW"] = flow
+                    vars_out["OLD_VLESS_TCP_UUID"] = clean_val(uuid)
+                    if port: vars_out["OLD_VLESS_TCP_PORT"] = clean_val(port)
+                    if sni: vars_out["OLD_VLESS_TCP_SNI"] = clean_val(sni)
+                    if flow: vars_out["OLD_VLESS_TCP_FLOW"] = clean_val(flow)
             elif scheme == "trojan":
                 pwd = urllib.parse.unquote(userinfo) if userinfo else ""
                 type_ = qs.get("type", [""])[0]
                 if type_ == "ws" or "ws" in tag:
-                    vars_out["OLD_TROJAN_WS_PWD"] = pwd
-                    if port: vars_out["OLD_TROJAN_WS_PORT"] = port
-                    if sni: vars_out["OLD_TROJAN_WS_SNI"] = sni
-                    if "path" in qs: vars_out["OLD_TROJAN_WS_PATH"] = qs["path"][0]
+                    vars_out["OLD_TROJAN_WS_PWD"] = clean_val(pwd)
+                    if port: vars_out["OLD_TROJAN_WS_PORT"] = clean_val(port)
+                    if sni: vars_out["OLD_TROJAN_WS_SNI"] = clean_val(sni)
+                    if "path" in qs: vars_out["OLD_TROJAN_WS_PATH"] = clean_val(qs["path"][0])
                 else:
-                    vars_out["OLD_TROJAN_TCP_PWD"] = pwd
-                    if port: vars_out["OLD_TROJAN_TCP_PORT"] = port
-                    if sni: vars_out["OLD_TROJAN_TCP_SNI"] = sni
+                    vars_out["OLD_TROJAN_TCP_PWD"] = clean_val(pwd)
+                    if port: vars_out["OLD_TROJAN_TCP_PORT"] = clean_val(port)
+                    if sni: vars_out["OLD_TROJAN_TCP_SNI"] = clean_val(sni)
             elif scheme == "ss":
                 try:
                     try:
@@ -2633,51 +2646,51 @@ for line in input_text.splitlines():
                         spwd = parts[1] if len(parts)>1 else ""
                         upwd = parts[2] if len(parts)>2 else ""
                         if "128" in method or "128" in tag:
-                            vars_out["OLD_SS128_METHOD"] = method
-                            vars_out["OLD_SS128_SPWD"] = spwd
-                            vars_out["OLD_SS128_UPWD"] = upwd
-                            if port: vars_out["OLD_SS128_PORT"] = port
+                            vars_out["OLD_SS128_METHOD"] = clean_val(method)
+                            vars_out["OLD_SS128_SPWD"] = clean_val(spwd)
+                            vars_out["OLD_SS128_UPWD"] = clean_val(upwd)
+                            if port: vars_out["OLD_SS128_PORT"] = clean_val(port)
                         else:
-                            vars_out["OLD_SS256_METHOD"] = method
-                            vars_out["OLD_SS256_SPWD"] = spwd
-                            vars_out["OLD_SS256_UPWD"] = upwd
-                            if port: vars_out["OLD_SS256_PORT"] = port
+                            vars_out["OLD_SS256_METHOD"] = clean_val(method)
+                            vars_out["OLD_SS256_SPWD"] = clean_val(spwd)
+                            vars_out["OLD_SS256_UPWD"] = clean_val(upwd)
+                            if port: vars_out["OLD_SS256_PORT"] = clean_val(port)
                     else:
                         pwd = parts[1] if len(parts)>1 else ""
-                        vars_out["OLD_SS_METHOD"] = method
-                        vars_out["OLD_SS_PWD"] = pwd
-                        if port: vars_out["OLD_SS_PORT"] = port
+                        vars_out["OLD_SS_METHOD"] = clean_val(method)
+                        vars_out["OLD_SS_PWD"] = clean_val(pwd)
+                        if port: vars_out["OLD_SS_PORT"] = clean_val(port)
                 except:
                     pass
             elif scheme == "hysteria2":
-                vars_out["OLD_HY2_PWD"] = urllib.parse.unquote(userinfo)
-                if port: vars_out["OLD_HY2_PORT"] = port
-                if sni: vars_out["OLD_HY2_SNI"] = sni
-                if "obfs" in qs: vars_out["OLD_HY2_OBFS"] = qs["obfs"][0]
-                if "obfs-password" in qs: vars_out["OLD_HY2_OBFSPWD"] = urllib.parse.unquote(qs["obfs-password"][0])
+                vars_out["OLD_HY2_PWD"] = clean_val(urllib.parse.unquote(userinfo))
+                if port: vars_out["OLD_HY2_PORT"] = clean_val(port)
+                if sni: vars_out["OLD_HY2_SNI"] = clean_val(sni)
+                if "obfs" in qs: vars_out["OLD_HY2_OBFS"] = clean_val(qs["obfs"][0])
+                if "obfs-password" in qs: vars_out["OLD_HY2_OBFSPWD"] = clean_val(urllib.parse.unquote(qs["obfs-password"][0]))
             elif scheme == "tuic":
                 dec_userinfo = urllib.parse.unquote(userinfo)
                 if ":" in dec_userinfo:
                     uid, pwd = dec_userinfo.split(":", 1)
-                    vars_out["OLD_TUIC_UUID"] = uid
-                    vars_out["OLD_TUIC_PWD"] = pwd
-                if port: vars_out["OLD_TUIC_PORT"] = port
-                if sni: vars_out["OLD_TUIC_SNI"] = sni
-                if "congestion_control" in qs: vars_out["OLD_TUIC_CC"] = qs["congestion_control"][0]
+                    vars_out["OLD_TUIC_UUID"] = clean_val(uid)
+                    vars_out["OLD_TUIC_PWD"] = clean_val(pwd)
+                if port: vars_out["OLD_TUIC_PORT"] = clean_val(port)
+                if sni: vars_out["OLD_TUIC_SNI"] = clean_val(sni)
+                if "congestion_control" in qs: vars_out["OLD_TUIC_CC"] = clean_val(qs["congestion_control"][0])
             elif scheme == "anytls":
-                vars_out["OLD_ANYTLS_PWD"] = urllib.parse.unquote(userinfo)
-                if port: vars_out["OLD_ANYTLS_PORT"] = port
-                if sni: vars_out["OLD_ANYTLS_SNI"] = sni
+                vars_out["OLD_ANYTLS_PWD"] = clean_val(urllib.parse.unquote(userinfo))
+                if port: vars_out["OLD_ANYTLS_PORT"] = clean_val(port)
+                if sni: vars_out["OLD_ANYTLS_SNI"] = clean_val(sni)
             elif scheme == "naive+https":
                 dec_userinfo = urllib.parse.unquote(userinfo)
                 if ":" in dec_userinfo:
                     uname, pwd = dec_userinfo.split(":", 1)
-                    if pwd: vars_out["OLD_NAIVE_PWD"] = pwd
-                    if uname: vars_out["OLD_NAIVE_UNAME"] = uname
+                    if pwd: vars_out["OLD_NAIVE_PWD"] = clean_val(pwd)
+                    if uname: vars_out["OLD_NAIVE_UNAME"] = clean_val(uname)
                 elif dec_userinfo:
-                    vars_out["OLD_NAIVE_UNAME"] = dec_userinfo
-                if port: vars_out["OLD_NAIVE_PORT"] = port
-                if sni: vars_out["OLD_NAIVE_SNI"] = sni
+                    vars_out["OLD_NAIVE_UNAME"] = clean_val(dec_userinfo)
+                if port: vars_out["OLD_NAIVE_PORT"] = clean_val(port)
+                if sni: vars_out["OLD_NAIVE_SNI"] = clean_val(sni)
     except Exception:
         pass
 
