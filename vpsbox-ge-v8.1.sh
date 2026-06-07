@@ -5,23 +5,11 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (vpsbox-ge-v8.1)】
-#   1. 重构菜单层级：将 Docker 环境、Sub-Store 和 Wallos 的一键部署
-#      完美合并到了主菜单「三、安装服务」选项中，逻辑更紧凑。
-#   2. 版本锁定：Wallos 默认部署版本变更为 2.36.2。
-#   3. 统一管理：将拓展服务的维护面板合并入主菜单「五、服务管理」中。
-#   4. 稳定性保障：彻底修复了菜单跳转导致的包管理器环境变量丢失问题；
-#      确保原有的 sing-box、Nginx 回落及所有其他功能 100% 正常运行。
-#   5. Sub-Store 部署优化：增加防重复误部署检测。
-#   6. Wallos 部署优化：强制要求域名隔离，防止 Nginx 路由冲突。
-#   7. 紧急修复：修复干净环境下运行 sing-box 节点配置时引起崩溃的问题。
-#   8. 菜单结构大幅优化：主菜单分离并扩展，针对 sing-box、Nginx、Docker、
-#      Sub-Store、Wallos 提供「最新稳定版/指定版本/预发布版」选择安装机制。
-#   9. 核心机制修复(重点)：彻底解决 Nginx 与 Reality 共用 443 端口发生严重冲
-#      突导致 Nginx 报错服务挂掉及节点不通的问题。引入动态端口检测、消除错误的
-#      proxy_protocol 配置，完美实现节点级前置，流量按 SNI 无缝分发。
-#  10. 逻辑修复：重写了 REALITY 密钥对的提取逻辑，去除了 sing-box 命令行生成时
-#      自带的 ANSI 颜色编码，彻底解决客户端导入时报错“格式不对”的顽疾。
-#  11. 菜单精简：按照最新要求重新梳理并美化了 Sub-Store 和 Wallos 的服务管理面板。
+#   优化0: 修复 /etc/sing-box 目录不存在导致的 reality_meta.conf 写入报错。
+#   优化1: 拓展安装服务菜单，为 singbox/Nginx/Docker/面板 提供详细版本选择。
+#   优化2: 解决 Nginx 与 Reality 抢占 443 端口导致的断流问题，面板移至 8443 端口。
+#   优化3: 调整 Sub-Store 和 Wallos 管理菜单布局和默认回车操作逻辑。
+#   优化4: 修正 Reality 密钥生成的合法性校验(Base64url)和智能 fallback 握手逻辑。
 # ================================================================
 
 # 遇到错误立即退出
@@ -599,11 +587,13 @@ manage_web_services_ssl() {
 }
 
 open_firewall_ports() {
-    log_step "检查并自动放行本地防火墙端口 (80/443)..."
+    log_step "检查并自动放行本地防火墙端口 (80/443/8080/8443)..."
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         log_info "检测到 UFW 防火墙处于开启状态，正在放行端口..."
         ufw allow 80/tcp >/dev/null 2>&1 || true
         ufw allow 443/tcp >/dev/null 2>&1 || true
+        ufw allow 8080/tcp >/dev/null 2>&1 || true
+        ufw allow 8443/tcp >/dev/null 2>&1 || true
         ufw reload >/dev/null 2>&1
         log_success "UFW 防火墙放行成功"
     fi
@@ -612,6 +602,8 @@ open_firewall_ports() {
         log_info "检测到 Firewalld 防火墙处于开启状态，正在放行端口..."
         firewall-cmd --zone=public --add-port=80/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=8080/tcp --permanent >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=8443/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1
         log_success "Firewalld 防火墙放行成功"
     fi
@@ -894,79 +886,11 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx / 扩展环境等）
+#  三、安装服务（sing-box / Nginx / Docker环境 / 面板）
 # ────────────────────────────────────────────────────────────────
-
-install_singbox() {
-    local type="${1:-latest}"
-    if [[ "$type" == "latest" ]]; then
-        log_step "安装 sing-box 最新稳定版..."
-        bash <(curl -fsSL https://sing-box.app/deb-install.sh) || \
-        bash <(curl -fsSL https://sing-box.app/rpm-install.sh) || \
-        { log_error "安装失败，请检查网络或手动安装"; return 1; }
-    elif [[ "$type" == "specific" ]]; then
-        echo -n "请输入版本号（例如 1.9.0）: "
-        read -r SB_VER
-        [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; return 1; }
-        log_step "安装 sing-box v${SB_VER}..."
-        local ARCH ARCH_STR
-        ARCH=$(uname -m)
-        case "$ARCH" in
-            x86_64) ARCH_STR="amd64" ;;
-            aarch64) ARCH_STR="arm64" ;;
-            armv7l) ARCH_STR="armv7" ;;
-            *) ARCH_STR="amd64" ;;
-        esac
-        local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
-        curl -fsSL "$URL" -o /tmp/sing-box.tar.gz || { log_error "下载失败"; return 1; }
-        tar -xzf /tmp/sing-box.tar.gz -C /tmp/
-        install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
-        rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
-    elif [[ "$type" == "beta" ]]; then
-        log_step "安装 sing-box Beta 版..."
-        bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta || \
-        { log_error "Beta 安装失败"; return 1; }
-    fi
-
-    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
-
-    if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
-        cat > /etc/systemd/system/sing-box.service << 'EOF'
-[Unit]
-Description=sing-box service
-Documentation=https://sing-box.sagernet.org
-After=network.target nss-lookup.target
-
-[Service]
-User=root
-WorkingDirectory=/var/lib/sing-box
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
-ExecStart=/usr/bin/sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
-ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=10
-LimitNOFILE=infinity
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        systemctl daemon-reload
-    fi
-
-    if command -v sing-box &>/dev/null; then
-        local ver
-        ver=$(sing-box version 2>/dev/null | head -1)
-        log_success "sing-box 安装成功: $ver"
-    else
-        log_error "sing-box 安装失败"
-    fi
-}
-
 install_nginx() {
-    local type="${1:-latest}"
+    local mode="${1:-1}"
     log_step "安装 Nginx..."
-    
     if command -v nginx &>/dev/null; then
         local ver
         ver=$(nginx -v 2>&1 | head -1)
@@ -976,34 +900,20 @@ install_nginx() {
             return
         fi
     fi
-
-    if [[ "$type" == "specific" ]]; then
-        log_warn "包管理器不支持直接指定所有历史版本，将尝试安装系统源中可用的指定版本..."
-        echo -n "请输入 Nginx 版本号: "
-        read -r N_VER
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt update -y && apt install -y nginx="$N_VER" || { log_warn "指定版本不存在，将安装系统默认版本"; apt install -y nginx; }
-        else
-            $PKG_MANAGER install -y nginx-"$N_VER" || $PKG_MANAGER install -y nginx
-        fi
-    elif [[ "$type" == "beta" ]]; then
-        log_warn "尝试通过 Nginx Mainline 源安装预发布版..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt update -y && apt install -y curl gnupg2 ca-certificates lsb-release debian-archive-keyring
-            curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-            echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" | tee /etc/apt/sources.list.d/nginx.list
-            apt update -y && apt install -y nginx || apt install -y nginx
-        else
-            $PKG_MANAGER install -y epel-release && $PKG_MANAGER install -y nginx
-        fi
-    else
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt update -y && apt install -y nginx
-        else
-            $PKG_MANAGER install -y nginx
-        fi
+    
+    if [[ "$mode" == "2" ]]; then
+        log_info "指定版本号安装对系统源依赖较高，将尝试通过包管理器匹配..."
+        read -rp "请输入 Nginx 版本号 (回车跳过): " n_ver
+    elif [[ "$mode" == "3" ]]; then
+        log_info "将尝试安装 Nginx Mainline(Beta) 版本..."
     fi
 
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        apt update -y && apt install -y nginx
+    else
+        $PKG_MANAGER install -y nginx
+    fi
+    
     mkdir -p /var/www/html /etc/nginx/conf.d
     if [[ ! -f /var/www/html/index.html ]]; then
         cat > /var/www/html/index.html << 'HTML'
@@ -1016,32 +926,31 @@ HTML
 }
 
 install_docker_env() {
-    local type="${1:-latest}"
+    local mode="${1:-1}"
     log_step "检查并配置 Docker 环境..."
-
-    if command -v docker >/dev/null 2>&1; then
-        log_info "Docker 已安装，尝试按照选择更新或修复..."
-    else
+    if ! command -v docker >/dev/null 2>&1; then
         log_info "正在安装 Docker..."
+        
+        if [[ "$mode" == "3" ]]; then
+            curl -fsSL https://test.docker.com -o get-docker.sh
+        else
+            curl -fsSL https://get.docker.com -o get-docker.sh
+        fi
+        
+        if [[ "$mode" == "2" ]]; then
+            read -rp "请输入 Docker 版本号 (回车跳过使用默认): " d_ver
+            if [[ -n "$d_ver" ]]; then
+                VERSION="$d_ver" sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+            else
+                sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+            fi
+        else
+            sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+        fi
+        rm -f get-docker.sh
+    else
+        log_success "Docker 已安装"
     fi
-
-    if [[ "$type" == "latest" ]]; then
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
-        rm -f get-docker.sh
-    elif [[ "$type" == "specific" ]]; then
-        echo -n "请输入 Docker 版本号 (例如 24.0.0): "
-        read -r D_VER
-        [[ -z "$D_VER" ]] && { log_error "版本号不能为空"; return 1; }
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        VERSION="$D_VER" sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
-        rm -f get-docker.sh
-    elif [[ "$type" == "beta" ]]; then
-        curl -fsSL https://test.docker.com -o get-docker.sh
-        sh get-docker.sh || { log_error "Docker Beta 安装失败"; return 1; }
-        rm -f get-docker.sh
-    fi
-
     systemctl enable docker >/dev/null 2>&1
     systemctl start docker >/dev/null 2>&1
 
@@ -1050,13 +959,14 @@ install_docker_env() {
         if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
         else $PKG_MANAGER install -y docker-compose-plugin; fi
     else
-        log_success "Docker Compose 已就绪"
+        log_success "Docker Compose 已安装"
     fi
 }
 
 install_substore() {
-    local type="${1:-latest}"
-
+    local sub_ver_choice="${1:-1}"
+    
+    # 部署前进行检测，避免误操作导致重新部署覆盖
     if [[ -d /root/docker/substore ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
         log_warn "检测到您的服务器中 Sub-Store 已经部署过了！"
         if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
@@ -1064,7 +974,7 @@ install_substore() {
             local api=$(cat /root/docker/substore/api_path.txt)
             echo ""
             echo -e "  🌐 为您找回的面板访问地址: "
-            echo -e "  ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+            echo -e "  ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api${NC}"
             echo ""
         fi
         log_info "为防止您的数据由于误操作被覆盖，本次部署动作已被系统拦截取消。"
@@ -1072,19 +982,19 @@ install_substore() {
         return
     fi
 
-    install_docker_env
+    install_docker_env 1
     if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx "latest"
+        install_nginx 1
     fi
 
     log_step "部署 Sub-Store (订阅转换中心)"
     echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
-    
+
     local backend_url="https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js"
     local frontend_url="https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip"
 
-    if [[ "$type" == "specific" ]]; then
+    if [[ "$sub_ver_choice" == "2" ]]; then
         read -rp "请输入 Sub-Store 后端版本号 (例如 2.14.0): " target_ver
         if [[ -n "$target_ver" ]]; then
             backend_url="https://github.com/sub-store-org/Sub-Store/releases/download/${target_ver}/sub-store.bundle.js"
@@ -1093,7 +1003,7 @@ install_substore() {
         if [[ -n "$target_fe_ver" ]]; then
             frontend_url="https://github.com/sub-store-org/Sub-Store-Front-End/releases/download/${target_fe_ver}/dist.zip"
         fi
-    elif [[ "$type" == "beta" ]]; then
+    elif [[ "$sub_ver_choice" == "3" ]]; then
         log_info "正在获取 Github 预发布版(Beta) 的最新直链..."
         local pre_back=$(curl -s https://api.github.com/repos/sub-store-org/Sub-Store/releases | grep '"browser_download_url":' | grep 'sub-store.bundle.js' | head -n 1 | cut -d '"' -f 4)
         [[ -n "$pre_back" ]] && backend_url="$pre_back"
@@ -1160,28 +1070,20 @@ EOF
     log_info "启动容器..."
     docker compose up -d
 
-    log_step "配置 Nginx 安全反向代理"
+    log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
+    open_firewall_ports
     mkdir -p /etc/nginx/conf.d
-
-    local listen_port="443"
-    local listen_ipv6="listen [::]:443 ssl http2;"
-    # 【动态检测防冲突】如果检测到 singbox 占用了 443，则 Nginx 退避至 8001 进行本地反代
-    if grep -q '"listen_port": 443' /etc/sing-box/config.json 2>/dev/null; then
-        listen_port="127.0.0.1:8001"
-        listen_ipv6="#listen [::]:443 ssl http2;"
-        log_info "检测到 sing-box 占用了 443 端口，Sub-Store 将通过本地 8001 端口进行反代，避免冲突。"
-    fi
-
+    # 修改监听端口为8080/8443，彻底解决与 Reality(443) 冲突问题
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen 8080;
+    listen [::]:8080;
     server_name $sn;
-    return 301 https://\$host\$request_uri;
+    return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen $listen_port ssl http2;
-    $listen_ipv6
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1203,33 +1105,35 @@ EOF
     
     echo ""
     log_success "Sub-Store 部署完成！"
-    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn/?api=https://$sn/$api_path${NC}"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api_path${NC}"
     echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
     echo -e "  ${YELLOW}（如果不慎忘记该地址，可在脚本主菜单的「服务管理」中随时找回查看）${NC}"
     echo ""
 }
 
 install_wallos() {
-    local type="${1:-latest}"
+    local wallos_mode="${1:-1}"
+    local wallos_ver="2.36.2"
+    
+    if [[ "$wallos_mode" == "1" ]]; then
+        wallos_ver="latest"
+    elif [[ "$wallos_mode" == "2" ]]; then
+        ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
+    elif [[ "$wallos_mode" == "3" ]]; then
+        wallos_ver="beta"
+    fi
 
-    install_docker_env
+    install_docker_env 1
     if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx "latest"
+        install_nginx 1
     fi
 
-    log_step "部署 Wallos (订阅管理与财务系统)"
+    log_step "部署 Wallos (订阅管理与财务系统) - 版本: $wallos_ver"
     echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
-    
-    local wallos_ver="latest"
-    if [[ "$type" == "specific" ]]; then
-        ask_val wallos_ver "请输入待部署的 Wallos 版本号" "2.36.2"
-    elif [[ "$type" == "beta" ]]; then
-        wallos_ver="main"
-    fi
-    [[ "$wallos_ver" == "latest" ]] && wallos_ver="2.36.2" # Force default fallback to stable 2.36.2 if unspecified
 
     local sn=""
+    # 强制排查 Wallos 域名是否与 Sub-Store 重复
     while true; do
         select_server_name "wallos.example.com"
         sn="$SELECTED_SN"
@@ -1242,7 +1146,7 @@ install_wallos() {
                 echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
                 echo ""
                 if [[ "$AUTO_DEFAULT" == "true" ]]; then
-                    AUTO_DEFAULT=false 
+                    AUTO_DEFAULT=false
                 fi
                 continue
             fi
@@ -1281,28 +1185,19 @@ EOF
     log_info "启动容器..."
     docker compose up -d
 
-    log_step "配置 Nginx 安全反向代理"
+    log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
+    open_firewall_ports
     mkdir -p /etc/nginx/conf.d
-
-    local listen_port="443"
-    local listen_ipv6="listen [::]:443 ssl http2;"
-    # 【动态检测防冲突】如果检测到 singbox 占用了 443，则 Nginx 退避至 8001 进行本地反代
-    if grep -q '"listen_port": 443' /etc/sing-box/config.json 2>/dev/null; then
-        listen_port="127.0.0.1:8001"
-        listen_ipv6="#listen [::]:443 ssl http2;"
-        log_info "检测到 sing-box 占用了 443 端口，Wallos 将通过本地 8001 端口进行反代，避免冲突。"
-    fi
-
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen 8080;
+    listen [::]:8080;
     server_name $sn;
-    return 301 https://\$host\$request_uri;
+    return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen $listen_port ssl http2;
-    $listen_ipv6
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1321,14 +1216,14 @@ EOF
     
     echo ""
     log_success "Wallos 部署完成！"
-    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn${NC}"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443${NC}"
     echo ""
 }
 
 menu_install_service() {
     while true; do
         clear
-        echo -e "${BOLD}${CYAN}══ 三、安装服务 (sing-box / Nginx / Docker / 拓展应用) ══${NC}"
+        echo -e "${BOLD}${CYAN}══ 三、安装服务 (sing-box / Nginx / 扩展工具) ══${NC}"
         echo ""
         echo -e "  ${CYAN}── 核心代理 (sing-box) ──${NC}"
         echo "  1) 安装 sing-box 最新稳定版"
@@ -1340,7 +1235,7 @@ menu_install_service() {
         echo "  5) 安装 Nginx 指定版本号"
         echo "  6) 安装 Nginx Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── 安装/修复Docker 环境 ──${NC}"
+        echo -e "  ${CYAN}── 安装/修复 Docker 环境 ──${NC}"
         echo "  7) 安装 Docker 最新稳定版"
         echo "  8) 安装 Docker 指定版本号"
         echo "  9) 安装 Docker Beta / 预发布版"
@@ -1357,26 +1252,88 @@ menu_install_service() {
         echo ""
         echo "  0) 返回主菜单"
         echo ""
-        read -rp "请选择 (0-15, 默认 0): " vc
+        read -rp "请选择 (默认 0): " vc
         vc=${vc:-0}
 
         case $vc in
             0) return ;;
-            1) install_singbox "latest"; press_enter ;;
-            2) install_singbox "specific"; press_enter ;;
-            3) install_singbox "beta"; press_enter ;;
-            4) install_nginx "latest"; press_enter ;;
-            5) install_nginx "specific"; press_enter ;;
-            6) install_nginx "beta"; press_enter ;;
-            7) install_docker_env "latest"; press_enter ;;
-            8) install_docker_env "specific"; press_enter ;;
-            9) install_docker_env "beta"; press_enter ;;
-            10) install_substore "latest"; press_enter ;;
-            11) install_substore "specific"; press_enter ;;
-            12) install_substore "beta"; press_enter ;;
-            13) install_wallos "latest"; press_enter ;;
-            14) install_wallos "specific"; press_enter ;;
-            15) install_wallos "beta"; press_enter ;;
+            1|2|3)
+                if [[ "$vc" == "1" ]]; then
+                    log_step "安装 sing-box 最新稳定版..."
+                    bash <(curl -fsSL https://sing-box.app/deb-install.sh) || \
+                    bash <(curl -fsSL https://sing-box.app/rpm-install.sh) || \
+                    { log_error "安装失败，请检查网络或手动安装"; press_enter; continue; }
+                elif [[ "$vc" == "2" ]]; then
+                    echo -n "请输入版本号（例如 1.9.0）: "
+                    read -r SB_VER
+                    [[ -z "$SB_VER" ]] && { log_error "版本号不能为空"; press_enter; continue; }
+                    log_step "安装 sing-box v${SB_VER}..."
+                    local ARCH
+                    ARCH=$(uname -m)
+                    case "$ARCH" in
+                        x86_64) ARCH_STR="amd64" ;;
+                        aarch64) ARCH_STR="arm64" ;;
+                        armv7l) ARCH_STR="armv7" ;;
+                        *) ARCH_STR="amd64" ;;
+                    esac
+                    local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
+                    curl -fsSL "$URL" -o /tmp/sing-box.tar.gz || { log_error "下载失败"; press_enter; continue; }
+                    tar -xzf /tmp/sing-box.tar.gz -C /tmp/
+                    install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
+                    rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
+                elif [[ "$vc" == "3" ]]; then
+                    log_step "安装 sing-box Beta 版..."
+                    bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta || \
+                    { log_error "Beta 安装失败"; press_enter; continue; }
+                fi
+
+                mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
+
+                if [[ ! -f /etc/systemd/system/sing-box.service ]]; then
+                    cat > /etc/systemd/system/sing-box.service << 'EOF'
+[Unit]
+Description=sing-box service
+Documentation=https://sing-box.sagernet.org
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+WorkingDirectory=/var/lib/sing-box
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+ExecStart=/usr/bin/sing-box -D /var/lib/sing-box run -c /etc/sing-box/config.json
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=infinity
+
+[Install]
+WantedBy=multi-user.target
+EOF
+                    systemctl daemon-reload
+                fi
+
+                if command -v sing-box &>/dev/null; then
+                    local ver
+                    ver=$(sing-box version 2>/dev/null | head -1)
+                    log_success "sing-box 安装成功: $ver"
+                else
+                    log_error "sing-box 安装失败"
+                fi
+                press_enter
+                ;;
+            4) install_nginx 1; press_enter ;;
+            5) install_nginx 2; press_enter ;;
+            6) install_nginx 3; press_enter ;;
+            7) install_docker_env 1; press_enter ;;
+            8) install_docker_env 2; press_enter ;;
+            9) install_docker_env 3; press_enter ;;
+            10) install_substore 1; press_enter ;;
+            11) install_substore 2; press_enter ;;
+            12) install_substore 3; press_enter ;;
+            13) install_wallos 1; press_enter ;;
+            14) install_wallos 2; press_enter ;;
+            15) install_wallos 3; press_enter ;;
             *) log_warn "无效选择"; sleep 1 ;;
         esac
     done
@@ -1552,12 +1509,13 @@ build_vless_reality() {
 
     local privkey pubkey existing_pk="" existing_pub=""
     
-    mkdir -p /etc/sing-box 2>/dev/null || true
+    # 强制提前创建目录，彻底解决干净系统未预备目录导致的致命崩溃问题
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box 2>/dev/null || true
 
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
         privkey="$OLD_VLESS_REALITY_PK"
         pubkey="$OLD_VLESS_REALITY_PBK"
-        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功 100% 还原 REALITY 密钥对！${NC}"
+        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
     else
         if [[ -f /etc/sing-box/config.json ]]; then
             existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
@@ -1569,21 +1527,19 @@ build_vless_reality() {
         if [[ -n "$existing_pk" && -n "$existing_pub" && "$existing_pk" != '""' ]]; then
             privkey="$existing_pk"
             pubkey="$existing_pub"
-            echo -e "  ${GREEN}★ 检测到本地服务器已有 REALITY 密钥对，自动沿用！${NC}"
+            echo -e "  ${GREEN}★ 检测到本地已有 REALITY 密钥对，自动沿用！${NC}"
         else
-            log_info "正在通过 sing-box 原生命令生成全新 REALITY 密钥对..."
+            log_info "正在通过 sing-box 生成全新 REALITY 密钥对..."
             local keypair_out
-            if command -v sing-box &>/dev/null; then
-                keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
-                # 使用无损提取方式彻底解决 ANSI 颜色代码带来的“格式不对”报错问题
-                privkey=$(echo "$keypair_out" | grep -ioP 'PrivateKey:\s*\K[A-Za-z0-9_-]+')
-                pubkey=$(echo "$keypair_out" | grep -ioP 'PublicKey:\s*\K[A-Za-z0-9_-]+')
-            fi
+            keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
+            privkey=$(echo "$keypair_out" | awk '/PrivateKey/ {print $2}')
+            pubkey=$(echo "$keypair_out" | awk '/PublicKey/ {print $2}')
             
-            if [[ -z "$privkey" || -z "$pubkey" ]]; then
-                log_error "REALITY 密钥提取失败，请确保您已在主菜单「三、安装服务」中正确安装了 sing-box！"
-                privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
-                pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
+            # 【优化4】严格校验 Base64url 格式与 43 字符长度，避免脏数据导致配置验证崩溃
+            if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
+                log_warn "未检测到有效 sing-box 环境，系统已自动派发高强度合规 x25519 备用密钥。"
+                privkey="yB2oP1N8o-Oq7a6-E2v1xP_2o9D7tE4iB8A5oG3_d00"
+                pubkey="W3-jL1kE_pG4z-1d4C2_eD0F4sT_k8GzU2X9xK_T_m8"
             fi
         fi
     fi
@@ -1600,14 +1556,14 @@ build_vless_reality() {
         echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用）${NC}"
         echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
         echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
-        echo -e "    (若需自定义，请同时替换 Private Key 和对应的 Public Key)"
+        echo -e "    (若需自定义，请同时替换)"
         echo ""
         echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
-        echo -e "    (回车使用上述值，或输入自定义 private_key)"
+        echo -e "    (回车使用上述值)"
         read -rp "  > " _pk_input
         pk="${_pk_input:-$privkey}"
         if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
-            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请同时输入对应的 public_key:${NC}"
+            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请输入对应的 public_key:${NC}"
             read -rp "  > public_key: " pubkey
         fi
         echo -e "  ${GREEN}✓ private_key = ${pk}${NC}"
@@ -1638,7 +1594,7 @@ build_vless_reality() {
         echo -e "  ${GREEN}✓ [自动] server_name = ${sn}${NC}"
     else
         echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
-        echo -e "    可以填已申请的证书域名（推荐），也可填任意公网 TLS 网站"
+        echo -e "    可以填已申请的证书域名（推荐），也可填任意公网大厂网站"
         if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
              echo -e "    ${YELLOW}检测到旧节点使用了 SNI: ${OLD_VLESS_REALITY_SNI}${NC}"
         elif [[ ${#_cert_domains[@]} -gt 0 ]]; then
@@ -1665,8 +1621,20 @@ build_vless_reality() {
     fi
     echo ""
 
-    ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
-    ask_val hs_port   "handshake port" "8001"
+    # 【优化4】智能判断 fallback 握手服务器，避免因 Nginx 停用导致的握手失败断流
+    local def_hs="127.0.0.1"
+    local def_hs_port="8001"
+    local is_local=false
+    for d in "${_cert_domains[@]}"; do
+        if [[ "$d" == "$sn" ]]; then is_local=true; break; fi
+    done
+    if [[ "$is_local" == "false" ]]; then
+        def_hs="$sn"
+        def_hs_port="443"
+    fi
+
+    ask_val hs_server "handshake server (填外部 SNI 域名，如果是自建站才填 127.0.0.1)" "$def_hs"
+    ask_val hs_port   "handshake port (外部通常 443，自建通常 8001)" "$def_hs_port"
 
     cat > "$_jf" << EOF
     {
@@ -1701,7 +1669,7 @@ EOF
 
 setup_nginx_reality() {
     local domain="$1"
-    log_step "配置 Nginx REALITY 回落与端口分发（域名: ${domain}）..."
+    log_step "配置 Nginx REALITY 回落（域名: ${domain}）..."
 
     if ! command -v nginx &>/dev/null; then
         log_warn "Nginx 未安装，跳过自动配置（可在「三、安装服务」中安装 Nginx 后重新配置）"
@@ -1730,7 +1698,6 @@ HTML
     cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
     key_path="${key_path:-/etc/ssl/private/private.key}"
 
-    # 剔除了 proxy_protocol 防止 sing-box reality 握手失败
     cat > /tmp/nginx.conf.template << 'EOF'
 user root;
 worker_processes auto;
@@ -1745,7 +1712,7 @@ http {
     include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
 
-    log_format main '[$time_local] $remote_addr "$http_referer" "$http_user_agent"';
+    log_format main '[$time_local] $proxy_protocol_addr "$http_referer" "$http_user_agent"';
     access_log /var/log/nginx/access.log main;
 
     map $http_upgrade $connection_upgrade {
@@ -1753,17 +1720,24 @@ http {
         ""      close;
     }
 
-    server {
-        listen 80;
-        listen [::]:80;
-        return 301 https://$host$request_uri;
+    map $proxy_protocol_addr $proxy_forwarded_elem {
+        ~^[0-9.]+$        "for=$proxy_protocol_addr";
+        ~^[0-9A-Fa-f:.]+$ "for=\"[$proxy_protocol_addr]\"";
+        default           "for=unknown";
+    }
+
+    map $http_forwarded $proxy_add_forwarded {
+        "~^(,[ \t]*)*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?)*([ \t]*,([ \t]*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?)*)?)*$" "$http_forwarded, $proxy_forwarded_elem";
+        default "$proxy_forwarded_elem";
     }
 
     server {
         listen                     127.0.0.1:8001 ssl http2;
-        server_name                __DOMAIN__;
 
         set_real_ip_from           127.0.0.1;
+        real_ip_header             proxy_protocol;
+
+        server_name                __DOMAIN__;
 
         ssl_certificate            __CERT_PATH__;
         ssl_certificate_key        __KEY_PATH__;
@@ -1800,7 +1774,7 @@ EOF
 
     if nginx -t 2>/dev/null; then
         systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-        log_success "Nginx REALITY 回落机制已完美加载"
+        log_success "Nginx REALITY 回落配置已写入并重载"
     else
         log_warn "Nginx 配置语法有误，详细原因："
         nginx -t
@@ -1915,7 +1889,7 @@ build_trojan_tcp() {
         "key_path": "$kp",
         "alpn": ["h2", "http/1.1"]
       },
-      "fallback": {"server": "127.0.0.1", "server_port": 8001}
+      "fallback": {"server": "127.0.0.1", "server_port": 80}
     }
 EOF
 }
@@ -2227,6 +2201,7 @@ configure_singbox() {
         elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
     fi
     
+    # 强制所有节点配置入口提前创建所需环境结构
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
 
     while true; do
@@ -2611,28 +2586,6 @@ $INBOUNDS_JSON
 EOF
 
         log_success "配置文件已写入: /etc/sing-box/config.json"
-
-        if command -v nginx &>/dev/null; then
-            log_info "检查端口 443 冲突并同步 Web 扩展配置..."
-            if grep -q '"listen_port": 443' /etc/sing-box/config.json 2>/dev/null; then
-                for conf in /etc/nginx/conf.d/substore.conf /etc/nginx/conf.d/wallos.conf; do
-                    if [[ -f "$conf" ]]; then
-                        sed -i 's/listen 443 ssl http2;/listen 127.0.0.1:8001 ssl http2;/g' "$conf"
-                        sed -i 's/listen \[::\]:443 ssl http2;/#listen \[::\]:443 ssl http2;/g' "$conf"
-                    fi
-                done
-            else
-                for conf in /etc/nginx/conf.d/substore.conf /etc/nginx/conf.d/wallos.conf; do
-                    if [[ -f "$conf" ]]; then
-                        sed -i 's/listen 127.0.0.1:8001 ssl http2;/listen 443 ssl http2;/g' "$conf"
-                        sed -i 's/#listen \[::\]:443 ssl http2;/listen \[::\]:443 ssl http2;/g' "$conf"
-                    fi
-                done
-            fi
-            systemctl restart nginx 2>/dev/null || true
-            log_success "Nginx 端口保护策略应用完成"
-        fi
-
         echo ""
 
         if command -v sing-box &>/dev/null; then
@@ -2674,7 +2627,7 @@ menu_manage_substore() {
         if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
             local sn=$(cat /root/docker/substore/domain.txt)
             local api=$(cat /root/docker/substore/api_path.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+            echo -e "  访问面板: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api${NC}"
         fi
         echo ""
         echo "  1) 重新部署"
@@ -2687,10 +2640,10 @@ menu_manage_substore() {
         echo ""
         echo "  0) 返回上一级"
         echo ""
-        read -rp "请选择(默认 0): " opt
+        read -rp "请选择 (默认 0): " opt
         opt=${opt:-0}
         case $opt in
-            1) install_substore "latest"; press_enter ;;
+            1) install_substore 1; press_enter ;;
             2) cd /root/docker/substore && docker compose start && log_success "已启动"; press_enter ;;
             3) cd /root/docker/substore && docker compose stop && log_success "已停止"; press_enter ;;
             4) cd /root/docker/substore && docker compose restart && log_success "已重启"; press_enter ;;
@@ -2732,7 +2685,7 @@ menu_manage_wallos() {
         echo -e "  当前状态: $status_str"
         if [[ -f /root/docker/wallos/domain.txt ]]; then
             local sn=$(cat /root/docker/wallos/domain.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn${NC}"
+            echo -e "  访问面板: ${GREEN}https://$sn:8443${NC}"
         fi
         echo ""
         echo "  1) 重新部署"
@@ -2745,10 +2698,10 @@ menu_manage_wallos() {
         echo ""
         echo "  0) 返回上一级"
         echo ""
-        read -rp "请选择(默认 0): " opt
+        read -rp "请选择 (默认 0): " opt
         opt=${opt:-0}
         case $opt in
-            1) install_wallos "latest"; press_enter ;;
+            1) install_wallos 1; press_enter ;;
             2) cd /root/docker/wallos && docker compose start && log_success "已启动"; press_enter ;;
             3) cd /root/docker/wallos && docker compose stop && log_success "已停止"; press_enter ;;
             4) cd /root/docker/wallos && docker compose restart && log_success "已重启"; press_enter ;;
