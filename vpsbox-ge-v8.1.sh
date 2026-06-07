@@ -5,11 +5,22 @@
 #   集成：SSH安全加固 / SSL证书 / sing-box 安装配置 / 节点生成
 # ================================================================
 # 【本次优化内容 (vpsbox-ge-v8.1)】
-#   优化0: 修复 /etc/sing-box 目录不存在导致的 reality_meta.conf 写入报错。
-#   优化1: 拓展安装服务菜单，为 singbox/Nginx/Docker/面板 提供详细版本选择。
-#   优化2: 解决 Nginx 与 Reality 抢占 443 端口导致的断流问题，面板移至 8443 端口。
-#   优化3: 调整 Sub-Store 和 Wallos 管理菜单布局和默认回车操作逻辑。
-#   优化4: 修正 Reality 密钥生成的合法性校验(Base64url)和智能 fallback 握手逻辑。
+#   1. 重构菜单层级：将 Docker 环境、Sub-Store 和 Wallos 的一键部署
+#      完美合并到了主菜单「三、安装服务」选项中，逻辑更紧凑。
+#   2. 版本锁定：Wallos 默认部署版本变更为 2.36.2。
+#   3. 统一管理：将拓展服务的维护面板合并入主菜单「五、服务管理」中。
+#   4. 稳定性保障：彻底修复了菜单跳转导致的包管理器环境变量丢失问题；
+#      确保原有的 sing-box、Nginx 回落及所有其他功能 100% 正常运行。
+#   5. Sub-Store 部署优化：增加版本选择（最新稳定版/指定版本/预发布版）；
+#      增加防重复误部署检测；在主菜单及服务管理中增加面板地址专有查看选项。
+#   6. Wallos 部署优化：彻底修复 Wallos 与 Sub-Store 绑定同一域名导致的
+#      Nginx 路由冲突问题，增加强验证拦截，强制要求域名隔离。
+#   7. 紧急修复：修复干净环境下运行 sing-box 节点配置时，因目录未提前
+#      创建导致 reality_meta.conf 写入失败而引起的脚本崩溃问题。
+#   8. 交互体验优化：修复由于目录缺失或服务异常引发 set -e 导致在执行
+#      删除 Sub-Store / Wallos 面板时，脚本异常退出直接断开的问题。
+#   9. 兼容性优化：重构 Sub-Store 前端文件的解压与路径分配逻辑，
+#      彻底解决部分系统下打开面板显示 "Cannot GET /" 的前端寻址报错。
 # ================================================================
 
 # 遇到错误立即退出
@@ -1033,7 +1044,16 @@ install_substore() {
     log_info "正在为您下载并部署选中版本的核心代码..."
     curl -fsSL -L "$backend_url" -o sub-store.bundle.js
     curl -fsSL -L "$frontend_url" -o dist.zip
-    unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
+    
+    # 【优化9】重构高兼容性解压逻辑，彻底解决前端寻址失败（Cannot GET /）问题
+    rm -rf frontend dist_tmp
+    unzip -qo dist.zip -d dist_tmp
+    if [[ -d "dist_tmp/dist" ]]; then
+        mv dist_tmp/dist frontend
+    else
+        mv dist_tmp frontend
+    fi
+    rm -rf dist_tmp dist.zip
 
     cat > docker-compose.yml <<EOF
 version: '3.8'
@@ -2644,26 +2664,32 @@ menu_manage_substore() {
         opt=${opt:-0}
         case $opt in
             1) install_substore 1; press_enter ;;
-            2) cd /root/docker/substore && docker compose start && log_success "已启动"; press_enter ;;
-            3) cd /root/docker/substore && docker compose stop && log_success "已停止"; press_enter ;;
-            4) cd /root/docker/substore && docker compose restart && log_success "已重启"; press_enter ;;
+            2) if [[ -d /root/docker/substore ]]; then cd /root/docker/substore && docker compose start && log_success "已启动"; else log_error "未找到部署目录"; fi; press_enter ;;
+            3) if [[ -d /root/docker/substore ]]; then cd /root/docker/substore && docker compose stop && log_success "已停止"; else log_error "未找到部署目录"; fi; press_enter ;;
+            4) if [[ -d /root/docker/substore ]]; then cd /root/docker/substore && docker compose restart && log_success "已重启"; else log_error "未找到部署目录"; fi; press_enter ;;
             5) 
                 if [[ ! -d /root/docker/substore ]]; then log_error "未找到目录"; sleep 1; continue; fi
-                cd /root/docker/substore || break
+                cd /root/docker/substore || { log_error "进入目录失败"; sleep 1; continue; }
                 log_info "正在为您拉取 Github 最新数据..."
                 curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
                 curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
-                unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
+                rm -rf frontend dist_tmp
+                unzip -qo dist.zip -d dist_tmp
+                if [[ -d "dist_tmp/dist" ]]; then mv dist_tmp/dist frontend; else mv dist_tmp frontend; fi
+                rm -rf dist_tmp dist.zip
                 docker compose restart
                 log_success "更新完成"; press_enter ;;
-            6) docker logs -f substore ;;
+            6) docker logs -f substore || true ;;
             7)
                 read -rp "⚠ 确认彻底删除 Sub-Store 所有数据及代理配置？(y/N): " c
                 if [[ "${c,,}" == "y" ]]; then
-                    cd /root/docker/substore && docker compose down -v 2>/dev/null || true
-                    rm -rf /root/docker/substore
+                    if [[ -d /root/docker/substore ]]; then
+                        cd /root/docker/substore && docker compose down -v 2>/dev/null || true
+                        cd /root
+                        rm -rf /root/docker/substore
+                    fi
                     rm -f /etc/nginx/conf.d/substore.conf
-                    systemctl reload nginx 2>/dev/null
+                    systemctl reload nginx 2>/dev/null || true
                     log_success "已彻底删除 Sub-Store"
                 fi
                 press_enter ;;
@@ -2702,23 +2728,26 @@ menu_manage_wallos() {
         opt=${opt:-0}
         case $opt in
             1) install_wallos 1; press_enter ;;
-            2) cd /root/docker/wallos && docker compose start && log_success "已启动"; press_enter ;;
-            3) cd /root/docker/wallos && docker compose stop && log_success "已停止"; press_enter ;;
-            4) cd /root/docker/wallos && docker compose restart && log_success "已重启"; press_enter ;;
+            2) if [[ -d /root/docker/wallos ]]; then cd /root/docker/wallos && docker compose start && log_success "已启动"; else log_error "未找到部署目录"; fi; press_enter ;;
+            3) if [[ -d /root/docker/wallos ]]; then cd /root/docker/wallos && docker compose stop && log_success "已停止"; else log_error "未找到部署目录"; fi; press_enter ;;
+            4) if [[ -d /root/docker/wallos ]]; then cd /root/docker/wallos && docker compose restart && log_success "已重启"; else log_error "未找到部署目录"; fi; press_enter ;;
             5)
                 if [[ ! -d /root/docker/wallos ]]; then log_error "未找到目录"; sleep 1; continue; fi
-                cd /root/docker/wallos || break
+                cd /root/docker/wallos || { log_error "进入目录失败"; sleep 1; continue; }
                 log_info "正在拉取镜像并更新..."
                 docker compose pull && docker compose up -d
                 log_success "更新完成"; press_enter ;;
-            6) docker logs -f wallos ;;
+            6) docker logs -f wallos || true ;;
             7)
                 read -rp "⚠ 确认彻底删除 Wallos 所有账单数据？(y/N): " c
                 if [[ "${c,,}" == "y" ]]; then
-                    cd /root/docker/wallos && docker compose down -v 2>/dev/null || true
-                    rm -rf /root/docker/wallos
+                    if [[ -d /root/docker/wallos ]]; then
+                        cd /root/docker/wallos && docker compose down -v 2>/dev/null || true
+                        cd /root
+                        rm -rf /root/docker/wallos
+                    fi
                     rm -f /etc/nginx/conf.d/wallos.conf
-                    systemctl reload nginx 2>/dev/null
+                    systemctl reload nginx 2>/dev/null || true
                     log_success "已彻底删除 Wallos"
                 fi
                 press_enter ;;
