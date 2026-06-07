@@ -21,6 +21,8 @@
 #      删除 Sub-Store / Wallos 面板时，脚本异常退出直接断开的问题。
 #   9. 兼容性优化：重构 Sub-Store 前端文件的解压与路径分配逻辑，
 #      彻底解决部分系统下打开面板显示 "Cannot GET /" 的前端寻址报错。
+#  10. 依赖防漏优化：修复用户跳过「基础组件安装」直接部署 Sub-Store 时，
+#      因系统缺失 unzip 导致下载后无法解压引发的报错中断问题。
 # ================================================================
 
 # 遇到错误立即退出
@@ -997,6 +999,21 @@ install_substore() {
     if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
         install_nginx 1
+    fi
+
+    # 【依赖防漏优化】确保 unzip 已经安装，防止由于未执行预装组件导致的部署闪退
+    if ! command -v unzip >/dev/null 2>&1; then
+        log_info "正在为您自动安装必要的 unzip 解压工具..."
+        if [[ "$PKG_MANAGER" == "apt" ]]; then
+            apt update -y >/dev/null 2>&1 || true
+            apt install -y unzip >/dev/null 2>&1 || true
+        else
+            $PKG_MANAGER install -y unzip >/dev/null 2>&1 || true
+        fi
+        if ! command -v unzip >/dev/null 2>&1; then
+            log_error "unzip 安装失败，请先在主菜单执行「1) 基础安全设置」预装基础组件，或手动安装 unzip。"
+            return
+        fi
     fi
 
     log_step "部署 Sub-Store (订阅转换中心)"
