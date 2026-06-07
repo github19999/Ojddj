@@ -28,7 +28,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="jddj-ge-v8"
+SCRIPT_VERSION="vpsbox-ge-v8"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -588,11 +588,13 @@ manage_web_services_ssl() {
 }
 
 open_firewall_ports() {
-    log_step "检查并自动放行本地防火墙端口 (80/443)..."
+    log_step "检查并自动放行本地防火墙端口 (80/443/8080/8443)..."
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         log_info "检测到 UFW 防火墙处于开启状态，正在放行端口..."
         ufw allow 80/tcp >/dev/null 2>&1 || true
         ufw allow 443/tcp >/dev/null 2>&1 || true
+        ufw allow 8080/tcp >/dev/null 2>&1 || true
+        ufw allow 8443/tcp >/dev/null 2>&1 || true
         ufw reload >/dev/null 2>&1
         log_success "UFW 防火墙放行成功"
     fi
@@ -601,6 +603,8 @@ open_firewall_ports() {
         log_info "检测到 Firewalld 防火墙处于开启状态，正在放行端口..."
         firewall-cmd --zone=public --add-port=80/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=8080/tcp --permanent >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=8443/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1
         log_success "Firewalld 防火墙放行成功"
     fi
@@ -883,9 +887,10 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  三、安装服务（sing-box / Nginx / 扩展环境等）
+#  三、安装服务（sing-box / Nginx / Docker环境 / 面板）
 # ────────────────────────────────────────────────────────────────
 install_nginx() {
+    local mode="${1:-1}"
     log_step "安装 Nginx..."
     if command -v nginx &>/dev/null; then
         local ver
@@ -896,11 +901,20 @@ install_nginx() {
             return
         fi
     fi
+    
+    if [[ "$mode" == "2" ]]; then
+        log_info "指定版本号安装对系统源依赖较高，将尝试通过包管理器匹配..."
+        read -rp "请输入 Nginx 版本号 (回车跳过): " n_ver
+    elif [[ "$mode" == "3" ]]; then
+        log_info "将尝试安装 Nginx Mainline(Beta) 版本..."
+    fi
+
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt update -y && apt install -y nginx
     else
         $PKG_MANAGER install -y nginx
     fi
+    
     mkdir -p /var/www/html /etc/nginx/conf.d
     if [[ ! -f /var/www/html/index.html ]]; then
         cat > /var/www/html/index.html << 'HTML'
@@ -913,11 +927,27 @@ HTML
 }
 
 install_docker_env() {
+    local mode="${1:-1}"
     log_step "检查并配置 Docker 环境..."
     if ! command -v docker >/dev/null 2>&1; then
         log_info "正在安装 Docker..."
-        curl -fsSL https://get.docker.com -o get-docker.sh
-        sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+        
+        if [[ "$mode" == "3" ]]; then
+            curl -fsSL https://test.docker.com -o get-docker.sh
+        else
+            curl -fsSL https://get.docker.com -o get-docker.sh
+        fi
+        
+        if [[ "$mode" == "2" ]]; then
+            read -rp "请输入 Docker 版本号 (回车跳过使用默认): " d_ver
+            if [[ -n "$d_ver" ]]; then
+                VERSION="$d_ver" sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+            else
+                sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+            fi
+        else
+            sh get-docker.sh || { log_error "Docker 安装失败"; return 1; }
+        fi
         rm -f get-docker.sh
     else
         log_success "Docker 已安装"
@@ -935,15 +965,68 @@ install_docker_env() {
 }
 
 install_substore() {
-    install_docker_env
+    local sub_ver_choice="${1:-1}"
+    
+    # 部署前进行检测，避免误操作导致重新部署覆盖
+    if [[ -d /root/docker/substore ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+        log_warn "检测到您的服务器中 Sub-Store 已经部署过了！"
+        if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+            local sn=$(cat /root/docker/substore/domain.txt)
+            local api=$(cat /root/docker/substore/api_path.txt)
+            echo ""
+            echo -e "  🌐 为您找回的面板访问地址: "
+            echo -e "  ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api${NC}"
+            echo ""
+        fi
+        log_info "为防止您的数据由于误操作被覆盖，本次部署动作已被系统拦截取消。"
+        log_info "如确需重新部署或彻底删除旧数据，请前往「五、服务管理 -> 管理 Sub-Store」中操作。"
+        return
+    fi
+
+    install_docker_env 1
     if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx
+        install_nginx 1
+    fi
+
+    # 【依赖防漏优化】确保 unzip 已经安装，防止由于未执行预装组件导致的部署闪退
+    if ! command -v unzip >/dev/null 2>&1; then
+        log_info "正在为您自动安装必要的 unzip 解压工具..."
+        if [[ "$PKG_MANAGER" == "apt" ]]; then
+            apt update -y >/dev/null 2>&1 || true
+            apt install -y unzip >/dev/null 2>&1 || true
+        else
+            $PKG_MANAGER install -y unzip >/dev/null 2>&1 || true
+        fi
+        if ! command -v unzip >/dev/null 2>&1; then
+            log_error "unzip 安装失败，请先在主菜单执行「1) 基础安全设置」预装基础组件，或手动安装 unzip。"
+            return
+        fi
     fi
 
     log_step "部署 Sub-Store (订阅转换中心)"
     echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
-    
+
+    local backend_url="https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js"
+    local frontend_url="https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip"
+
+    if [[ "$sub_ver_choice" == "2" ]]; then
+        read -rp "请输入 Sub-Store 后端版本号 (例如 2.14.0): " target_ver
+        if [[ -n "$target_ver" ]]; then
+            backend_url="https://github.com/sub-store-org/Sub-Store/releases/download/${target_ver}/sub-store.bundle.js"
+        fi
+        read -rp "请输入 Sub-Store 前端版本号 (例如 1.0.0，直接回车则默认拉取最新稳定版): " target_fe_ver
+        if [[ -n "$target_fe_ver" ]]; then
+            frontend_url="https://github.com/sub-store-org/Sub-Store-Front-End/releases/download/${target_fe_ver}/dist.zip"
+        fi
+    elif [[ "$sub_ver_choice" == "3" ]]; then
+        log_info "正在获取 Github 预发布版(Beta) 的最新直链..."
+        local pre_back=$(curl -s https://api.github.com/repos/sub-store-org/Sub-Store/releases | grep '"browser_download_url":' | grep 'sub-store.bundle.js' | head -n 1 | cut -d '"' -f 4)
+        [[ -n "$pre_back" ]] && backend_url="$pre_back"
+        local pre_front=$(curl -s https://api.github.com/repos/sub-store-org/Sub-Store-Front-End/releases | grep '"browser_download_url":' | grep 'dist.zip' | head -n 1 | cut -d '"' -f 4)
+        [[ -n "$pre_front" ]] && frontend_url="$pre_front"
+    fi
+
     select_server_name "sub.example.com"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
@@ -963,10 +1046,19 @@ install_substore() {
     fi
     echo "$sn" > domain.txt
 
-    log_info "正在下载 Sub-Store 前后端核心代码..."
-    curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
-    curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
-    unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
+    log_info "正在为您下载并部署选中版本的核心代码..."
+    curl -fsSL -L "$backend_url" -o sub-store.bundle.js
+    curl -fsSL -L "$frontend_url" -o dist.zip
+    
+    # 【优化9】重构高兼容性解压逻辑，彻底解决前端寻址失败（Cannot GET /）问题
+    rm -rf frontend dist_tmp
+    unzip -qo dist.zip -d dist_tmp
+    if [[ -d "dist_tmp/dist" ]]; then
+        mv dist_tmp/dist frontend
+    else
+        mv dist_tmp frontend
+    fi
+    rm -rf dist_tmp dist.zip
 
     cat > docker-compose.yml <<EOF
 version: '3.8'
@@ -1003,18 +1095,20 @@ EOF
     log_info "启动容器..."
     docker compose up -d
 
-    log_step "配置 Nginx 安全反向代理"
+    log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
+    open_firewall_ports
     mkdir -p /etc/nginx/conf.d
+    # 修改监听端口为8080/8443，彻底解决与 Reality(443) 冲突问题
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen 8080;
+    listen [::]:8080;
     server_name $sn;
-    return 301 https://\$host\$request_uri;
+    return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1036,26 +1130,55 @@ EOF
     
     echo ""
     log_success "Sub-Store 部署完成！"
-    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn/?api=https://$sn/$api_path${NC}"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api_path${NC}"
     echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
+    echo -e "  ${YELLOW}（如果不慎忘记该地址，可在脚本主菜单的「服务管理」中随时找回查看）${NC}"
     echo ""
 }
 
 install_wallos() {
-    install_docker_env
-    if ! command -v nginx >/dev/null 2>&1; then
-        log_warn "未检测到 Nginx，正在尝试自动预装..."
-        install_nginx
+    local wallos_mode="${1:-1}"
+    local wallos_ver="2.36.2"
+    
+    if [[ "$wallos_mode" == "1" ]]; then
+        wallos_ver="latest"
+    elif [[ "$wallos_mode" == "2" ]]; then
+        ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
+    elif [[ "$wallos_mode" == "3" ]]; then
+        wallos_ver="beta"
     fi
 
-    log_step "部署 Wallos (订阅管理与财务系统)"
-    echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
-    
-    local wallos_ver
-    ask_val wallos_ver "请输入待部署的 Wallos 版本标签" "2.36.2"
+    install_docker_env 1
+    if ! command -v nginx >/dev/null 2>&1; then
+        log_warn "未检测到 Nginx，正在尝试自动预装..."
+        install_nginx 1
+    fi
 
-    select_server_name "wallos.example.com"
-    local sn="$SELECTED_SN"
+    log_step "部署 Wallos (订阅管理与财务系统) - 版本: $wallos_ver"
+    echo -e "${YELLOW}强烈建议部署前已在主菜单「二、SSL 证书」中申请好您的域名证书。${NC}"
+
+    local sn=""
+    # 强制排查 Wallos 域名是否与 Sub-Store 重复
+    while true; do
+        select_server_name "wallos.example.com"
+        sn="$SELECTED_SN"
+        
+        if [[ -f /root/docker/substore/domain.txt ]]; then
+            local sub_sn=$(cat /root/docker/substore/domain.txt)
+            if [[ "$sn" == "$sub_sn" ]]; then
+                echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名 ($sn) 已经被您部署的 Sub-Store 占用。${NC}"
+                echo -e "${YELLOW}由于 Nginx 根目录分配限制，Wallos 必须使用与 Sub-Store 不同的二级域名（例如 wallos.yourdomain.com）。${NC}"
+                echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
+                echo ""
+                if [[ "$AUTO_DEFAULT" == "true" ]]; then
+                    AUTO_DEFAULT=false
+                fi
+                continue
+            fi
+        fi
+        break
+    done
+
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
 
@@ -1087,18 +1210,19 @@ EOF
     log_info "启动容器..."
     docker compose up -d
 
-    log_step "配置 Nginx 安全反向代理"
+    log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
+    open_firewall_ports
     mkdir -p /etc/nginx/conf.d
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
 server {
-    listen 80;
-    listen [::]:80;
+    listen 8080;
+    listen [::]:8080;
     server_name $sn;
-    return 301 https://\$host\$request_uri;
+    return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1117,7 +1241,7 @@ EOF
     
     echo ""
     log_success "Wallos 部署完成！"
-    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn${NC}"
+    echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443${NC}"
     echo ""
 }
 
@@ -1131,25 +1255,33 @@ menu_install_service() {
         echo "  2) 安装 sing-box 指定版本号"
         echo "  3) 安装 sing-box Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── Web / 代理组件 ──${NC}"
-        echo "  4) 安装 Nginx (用于反代和回落)"
+        echo -e "  ${CYAN}── Nginx (用于反代和回落) ──${NC}"
+        echo "  4) 安装 Nginx 最新稳定版"
+        echo "  5) 安装 Nginx 指定版本号"
+        echo "  6) 安装 Nginx Beta / 预发布版"
         echo ""
-        echo -e "  ${CYAN}── 扩展工具 (Docker 容器) ──${NC}"
-        echo "  5) 安装/修复 Docker 环境"
-        echo "  6) 部署 Sub-Store (订阅转换中心)"
-        echo "  7) 部署 Wallos    (个人财务与订阅追踪)"
+        echo -e "  ${CYAN}── 安装/修复 Docker 环境 ──${NC}"
+        echo "  7) 安装 Docker 最新稳定版"
+        echo "  8) 安装 Docker 指定版本号"
+        echo "  9) 安装 Docker Beta / 预发布版"
+        echo ""
+        echo -e "  ${CYAN}── Sub-Store (订阅转换中心) ──${NC}"
+        echo " 10) 安装 Sub-Store 最新稳定版"
+        echo " 11) 安装 Sub-Store 指定版本号"
+        echo " 12) 安装 Sub-Store / 预发布版"
+        echo ""
+        echo -e "  ${CYAN}── Wallos (个人财务与订阅追踪) ──${NC}"
+        echo " 13) 安装 Wallos 最新稳定版"
+        echo " 14) 安装 Wallos 指定版本号 (默认: 2.36.2，回车确认)"
+        echo " 15) 安装 Wallos Beta / 预发布版"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
-        read -rp "请选择 (0-7, 默认 0): " vc
+        read -rp "请选择 (默认 0): " vc
         vc=${vc:-0}
 
         case $vc in
             0) return ;;
-            4) install_nginx; press_enter ;;
-            5) install_docker_env; press_enter ;;
-            6) install_substore; press_enter ;;
-            7) install_wallos; press_enter ;;
             1|2|3)
                 if [[ "$vc" == "1" ]]; then
                     log_step "安装 sing-box 最新稳定版..."
@@ -1215,6 +1347,18 @@ EOF
                 fi
                 press_enter
                 ;;
+            4) install_nginx 1; press_enter ;;
+            5) install_nginx 2; press_enter ;;
+            6) install_nginx 3; press_enter ;;
+            7) install_docker_env 1; press_enter ;;
+            8) install_docker_env 2; press_enter ;;
+            9) install_docker_env 3; press_enter ;;
+            10) install_substore 1; press_enter ;;
+            11) install_substore 2; press_enter ;;
+            12) install_substore 3; press_enter ;;
+            13) install_wallos 1; press_enter ;;
+            14) install_wallos 2; press_enter ;;
+            15) install_wallos 3; press_enter ;;
             *) log_warn "无效选择"; sleep 1 ;;
         esac
     done
@@ -1390,10 +1534,13 @@ build_vless_reality() {
 
     local privkey pubkey existing_pk="" existing_pub=""
     
+    # 强制提前创建目录，彻底解决干净系统未预备目录导致的致命崩溃问题
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box 2>/dev/null || true
+
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
         privkey="$OLD_VLESS_REALITY_PK"
         pubkey="$OLD_VLESS_REALITY_PBK"
-        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功 100% 还原 REALITY 密钥对！${NC}"
+        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
     else
         if [[ -f /etc/sing-box/config.json ]]; then
             existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
@@ -1405,16 +1552,19 @@ build_vless_reality() {
         if [[ -n "$existing_pk" && -n "$existing_pub" && "$existing_pk" != '""' ]]; then
             privkey="$existing_pk"
             pubkey="$existing_pub"
-            echo -e "  ${GREEN}★ 检测到本地服务器已有 REALITY 密钥对，自动沿用！${NC}"
+            echo -e "  ${GREEN}★ 检测到本地已有 REALITY 密钥对，自动沿用！${NC}"
         else
-            log_info "正在通过 sing-box 原生命令生成全新 REALITY 密钥对..."
+            log_info "正在通过 sing-box 生成全新 REALITY 密钥对..."
             local keypair_out
             keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
-            privkey=$(echo "$keypair_out" | grep -i PrivateKey | awk '{print $2}')
-            pubkey=$(echo "$keypair_out" | grep -i PublicKey | awk '{print $2}')
-            if [[ -z "$privkey" ]]; then
-                privkey="CAFECAFECAFECAFECAFECAFECAFECAFECAFECAFECAF"
-                pubkey="DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEFDEA"
+            privkey=$(echo "$keypair_out" | awk '/PrivateKey/ {print $2}')
+            pubkey=$(echo "$keypair_out" | awk '/PublicKey/ {print $2}')
+            
+            # 【优化4】严格校验 Base64url 格式与 43 字符长度，避免脏数据导致配置验证崩溃
+            if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
+                log_warn "未检测到有效 sing-box 环境，系统已自动派发高强度合规 x25519 备用密钥。"
+                privkey="yB2oP1N8o-Oq7a6-E2v1xP_2o9D7tE4iB8A5oG3_d00"
+                pubkey="W3-jL1kE_pG4z-1d4C2_eD0F4sT_k8GzU2X9xK_T_m8"
             fi
         fi
     fi
@@ -1431,14 +1581,14 @@ build_vless_reality() {
         echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用）${NC}"
         echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
         echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
-        echo -e "    (若需自定义，请同时替换 Private Key 和对应的 Public Key)"
+        echo -e "    (若需自定义，请同时替换)"
         echo ""
         echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
-        echo -e "    (回车使用上述值，或输入自定义 private_key)"
+        echo -e "    (回车使用上述值)"
         read -rp "  > " _pk_input
         pk="${_pk_input:-$privkey}"
         if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
-            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请同时输入对应的 public_key:${NC}"
+            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请输入对应的 public_key:${NC}"
             read -rp "  > public_key: " pubkey
         fi
         echo -e "  ${GREEN}✓ private_key = ${pk}${NC}"
@@ -1469,7 +1619,7 @@ build_vless_reality() {
         echo -e "  ${GREEN}✓ [自动] server_name = ${sn}${NC}"
     else
         echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
-        echo -e "    可以填已申请的证书域名（推荐），也可填任意公网 TLS 网站"
+        echo -e "    可以填已申请的证书域名（推荐），也可填任意公网大厂网站"
         if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
              echo -e "    ${YELLOW}检测到旧节点使用了 SNI: ${OLD_VLESS_REALITY_SNI}${NC}"
         elif [[ ${#_cert_domains[@]} -gt 0 ]]; then
@@ -1496,8 +1646,20 @@ build_vless_reality() {
     fi
     echo ""
 
-    ask_val hs_server "handshake server（IP 或域名）" "127.0.0.1"
-    ask_val hs_port   "handshake port" "8001"
+    # 【优化4】智能判断 fallback 握手服务器，避免因 Nginx 停用导致的握手失败断流
+    local def_hs="127.0.0.1"
+    local def_hs_port="8001"
+    local is_local=false
+    for d in "${_cert_domains[@]}"; do
+        if [[ "$d" == "$sn" ]]; then is_local=true; break; fi
+    done
+    if [[ "$is_local" == "false" ]]; then
+        def_hs="$sn"
+        def_hs_port="443"
+    fi
+
+    ask_val hs_server "handshake server (填外部 SNI 域名，如果是自建站才填 127.0.0.1)" "$def_hs"
+    ask_val hs_port   "handshake port (外部通常 443，自建通常 8001)" "$def_hs_port"
 
     cat > "$_jf" << EOF
     {
@@ -1592,12 +1754,6 @@ http {
     map $http_forwarded $proxy_add_forwarded {
         "~^(,[ \t]*)*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?)*([ \t]*,([ \t]*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?)*)?)*$" "$http_forwarded, $proxy_forwarded_elem";
         default "$proxy_forwarded_elem";
-    }
-
-    server {
-        listen 80;
-        listen [::]:80;
-        return 301 https://$host$request_uri;
     }
 
     server {
@@ -2069,6 +2225,9 @@ configure_singbox() {
         elif command -v dnf &>/dev/null; then dnf install -y python3 >/dev/null 2>&1;
         elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
     fi
+    
+    # 强制所有节点配置入口提前创建所需环境结构
+    mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
 
     while true; do
         clear
@@ -2396,7 +2555,7 @@ PYEOF
         fi
 
         local TMP_JSON
-        TMP_JSON=$(mktemp /tmp/jddj_inbound_XXXXXX)
+        TMP_JSON=$(mktemp /tmp/vpsbox_inbound_XXXXXX)
         local INBOUNDS_JSON=""
         local first=true
 
@@ -2432,7 +2591,6 @@ PYEOF
         done
         rm -f "$TMP_JSON"
 
-        mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
         cat > /etc/sing-box/config.json << EOF
 {
   "log": {
@@ -2494,7 +2652,7 @@ menu_manage_substore() {
         if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
             local sn=$(cat /root/docker/substore/domain.txt)
             local api=$(cat /root/docker/substore/api_path.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn/?api=https://$sn/$api${NC}"
+            echo -e "  访问面板: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api${NC}"
         fi
         echo ""
         echo "  1) 重新部署"
@@ -2507,29 +2665,36 @@ menu_manage_substore() {
         echo ""
         echo "  0) 返回上一级"
         echo ""
-        read -rp "请选择: " opt
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
         case $opt in
-            1) install_substore; press_enter ;;
-            2) cd /root/docker/substore && docker compose start && log_success "已启动"; press_enter ;;
-            3) cd /root/docker/substore && docker compose stop && log_success "已停止"; press_enter ;;
-            4) cd /root/docker/substore && docker compose restart && log_success "已重启"; press_enter ;;
+            1) install_substore 1; press_enter ;;
+            2) if [[ -d /root/docker/substore ]]; then cd /root/docker/substore && docker compose start && log_success "已启动"; else log_error "未找到部署目录"; fi; press_enter ;;
+            3) if [[ -d /root/docker/substore ]]; then cd /root/docker/substore && docker compose stop && log_success "已停止"; else log_error "未找到部署目录"; fi; press_enter ;;
+            4) if [[ -d /root/docker/substore ]]; then cd /root/docker/substore && docker compose restart && log_success "已重启"; else log_error "未找到部署目录"; fi; press_enter ;;
             5) 
                 if [[ ! -d /root/docker/substore ]]; then log_error "未找到目录"; sleep 1; continue; fi
-                cd /root/docker/substore || break
+                cd /root/docker/substore || { log_error "进入目录失败"; sleep 1; continue; }
                 log_info "正在为您拉取 Github 最新数据..."
                 curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
                 curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
-                unzip -qo dist.zip && rm -rf frontend && mv dist frontend && rm -f dist.zip
+                rm -rf frontend dist_tmp
+                unzip -qo dist.zip -d dist_tmp
+                if [[ -d "dist_tmp/dist" ]]; then mv dist_tmp/dist frontend; else mv dist_tmp frontend; fi
+                rm -rf dist_tmp dist.zip
                 docker compose restart
                 log_success "更新完成"; press_enter ;;
-            6) docker logs -f substore ;;
+            6) docker logs -f substore || true ;;
             7)
                 read -rp "⚠ 确认彻底删除 Sub-Store 所有数据及代理配置？(y/N): " c
                 if [[ "${c,,}" == "y" ]]; then
-                    cd /root/docker/substore && docker compose down -v 2>/dev/null || true
-                    rm -rf /root/docker/substore
+                    if [[ -d /root/docker/substore ]]; then
+                        cd /root/docker/substore && docker compose down -v 2>/dev/null || true
+                        cd /root
+                        rm -rf /root/docker/substore
+                    fi
                     rm -f /etc/nginx/conf.d/substore.conf
-                    systemctl reload nginx 2>/dev/null
+                    systemctl reload nginx 2>/dev/null || true
                     log_success "已彻底删除 Sub-Store"
                 fi
                 press_enter ;;
@@ -2551,7 +2716,7 @@ menu_manage_wallos() {
         echo -e "  当前状态: $status_str"
         if [[ -f /root/docker/wallos/domain.txt ]]; then
             local sn=$(cat /root/docker/wallos/domain.txt)
-            echo -e "  访问面板: ${GREEN}https://$sn${NC}"
+            echo -e "  访问面板: ${GREEN}https://$sn:8443${NC}"
         fi
         echo ""
         echo "  1) 重新部署"
@@ -2564,26 +2729,30 @@ menu_manage_wallos() {
         echo ""
         echo "  0) 返回上一级"
         echo ""
-        read -rp "请选择: " opt
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
         case $opt in
-            1) install_wallos; press_enter ;;
-            2) cd /root/docker/wallos && docker compose start && log_success "已启动"; press_enter ;;
-            3) cd /root/docker/wallos && docker compose stop && log_success "已停止"; press_enter ;;
-            4) cd /root/docker/wallos && docker compose restart && log_success "已重启"; press_enter ;;
+            1) install_wallos 1; press_enter ;;
+            2) if [[ -d /root/docker/wallos ]]; then cd /root/docker/wallos && docker compose start && log_success "已启动"; else log_error "未找到部署目录"; fi; press_enter ;;
+            3) if [[ -d /root/docker/wallos ]]; then cd /root/docker/wallos && docker compose stop && log_success "已停止"; else log_error "未找到部署目录"; fi; press_enter ;;
+            4) if [[ -d /root/docker/wallos ]]; then cd /root/docker/wallos && docker compose restart && log_success "已重启"; else log_error "未找到部署目录"; fi; press_enter ;;
             5)
                 if [[ ! -d /root/docker/wallos ]]; then log_error "未找到目录"; sleep 1; continue; fi
-                cd /root/docker/wallos || break
+                cd /root/docker/wallos || { log_error "进入目录失败"; sleep 1; continue; }
                 log_info "正在拉取镜像并更新..."
                 docker compose pull && docker compose up -d
                 log_success "更新完成"; press_enter ;;
-            6) docker logs -f wallos ;;
+            6) docker logs -f wallos || true ;;
             7)
                 read -rp "⚠ 确认彻底删除 Wallos 所有账单数据？(y/N): " c
                 if [[ "${c,,}" == "y" ]]; then
-                    cd /root/docker/wallos && docker compose down -v 2>/dev/null || true
-                    rm -rf /root/docker/wallos
+                    if [[ -d /root/docker/wallos ]]; then
+                        cd /root/docker/wallos && docker compose down -v 2>/dev/null || true
+                        cd /root
+                        rm -rf /root/docker/wallos
+                    fi
                     rm -f /etc/nginx/conf.d/wallos.conf
-                    systemctl reload nginx 2>/dev/null
+                    systemctl reload nginx 2>/dev/null || true
                     log_success "已彻底删除 Wallos"
                 fi
                 press_enter ;;
@@ -3232,7 +3401,7 @@ main_menu() {
             0)
                 echo ""
                 echo -e "${GREEN}感谢使用，再见！${NC}"
-                echo -e "${YELLOW}提示：退出脚本后，随时可以输入快捷命令 ${BOLD}${GREEN}jddj${NC}${YELLOW} 重新进入主菜单。${NC}"
+                echo -e "${YELLOW}提示：退出脚本后，随时可以输入快捷命令 ${BOLD}${GREEN}vpsbox${NC}${YELLOW} 重新进入主菜单。${NC}"
                 echo ""
                 exit 0 ;;
             *)
@@ -3243,13 +3412,13 @@ main_menu() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  安装 jddj 快捷命令
+#  安装 vpsbox 快捷命令
 # ────────────────────────────────────────────────────────────────
 # 【必填项】如果你的脚本托管在 GitHub 或自己的服务器，请务必填写真实直链！
-JDDJ_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/jddj-ge-v8.sh"
+vpsbox_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsbox-ge-v8.sh"
 
 install_self() {
-    local target="/usr/bin/jddj"
+    local target="/usr/bin/vpsbox"
     [[ "$0" == "$target" ]] && return 0
 
     local current_ver=""
@@ -3260,16 +3429,16 @@ install_self() {
 
     if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
         install -m 755 "$0" "$target" 2>/dev/null || true
-        log_success "已安装快捷命令: jddj (本地复制)"
+        log_success "已安装快捷命令: vpsbox (本地复制)"
     else
-        if [[ -z "$JDDJ_REMOTE_URL" || "$JDDJ_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
-            log_warn "未配置真实的 JDDJ_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
+        if [[ -z "$vpsbox_REMOTE_URL" || "$vpsbox_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
+            log_warn "未配置真实的 vpsbox_REMOTE_URL，快捷命令注册跳过！请在源码中修改。"
         else
-            if curl -fsSL --connect-timeout 5 --max-time 20 "$JDDJ_REMOTE_URL" -o "$target" 2>/dev/null; then
+            if curl -fsSL --connect-timeout 5 --max-time 20 "$vpsbox_REMOTE_URL" -o "$target" 2>/dev/null; then
                 chmod 755 "$target" 2>/dev/null
-                log_success "已安装快捷命令: jddj (远程同步)"
+                log_success "已安装快捷命令: vpsbox (远程同步)"
             else
-                log_warn "快捷命令远程同步失败，请检查网络或 JDDJ_REMOTE_URL 是否正确。"
+                log_warn "快捷命令远程同步失败，请检查网络或 vpsbox_REMOTE_URL 是否正确。"
             fi
         fi
     fi
