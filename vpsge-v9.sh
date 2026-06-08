@@ -19,6 +19,8 @@
 #   7. 导入断流修复：彻底修复了旧节点导入后，除了 SS 外其他协议全部不通的 Bug。
 #      (原因：旧链接常将IP隐式传递为SNI，导致生成新配置时 TLS 证书验证完全崩溃。
 #      已在 Python 解析核心中增加防 IP 污染及脏字符剥离过滤，实现 100% 无损还原)。
+#   8. 服务报错修复：修复了在未安装组件时，从服务管理启停引发的 systemctl 报错问题；
+#      补全了遗失的 Sub-Store 和 Wallos 服务面板管理模块。
 # ================================================================
 
 # 遇到错误立即退出
@@ -2856,6 +2858,182 @@ EOF
 # ────────────────────────────────────────────────────────────────
 #  五、管理面板（Sub-Store / Wallos / Realm）
 # ────────────────────────────────────────────────────────────────
+
+menu_manage_substore() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ 管理 Sub-Store ══${NC}"
+        echo ""
+        local status_str="${RED}○ 未安装${NC}"
+        if command -v docker >/dev/null 2>&1; then
+            if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+                if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+                    status_str="${GREEN}● 运行中${NC}"
+                else
+                    status_str="${YELLOW}● 已停止${NC}"
+                fi
+            fi
+        fi
+
+        echo -e "  服务状态: $status_str"
+        echo ""
+        echo "  1) 启动 Sub-Store"
+        echo "  2) 停止 Sub-Store"
+        echo "  3) 重启 Sub-Store"
+        echo "  4) 查看实时日志"
+        echo "  5) 查看面板访问地址"
+        echo "  6) 彻底卸载并删除数据"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
+        case $opt in
+            1) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^substore$"; then
+                    docker start substore 2>/dev/null && log_success "已启动" || log_error "启动失败"
+                else
+                    log_error "未找到容器，请先在「三、安装服务」中部署"
+                fi
+                press_enter ;;
+            2) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^substore$"; then
+                    docker stop substore 2>/dev/null && log_success "已停止" || log_error "停止失败"
+                else
+                    log_error "未找到容器"
+                fi
+                press_enter ;;
+            3) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^substore$"; then
+                    docker restart substore 2>/dev/null && log_success "已重启" || log_error "重启失败"
+                else
+                    log_error "未找到容器"
+                fi
+                press_enter ;;
+            4) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^substore$"; then
+                    docker logs -f substore 2>/dev/null
+                else
+                    log_error "未找到容器"
+                    press_enter
+                fi
+                ;;
+            5)
+                if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+                    local sn=$(cat /root/docker/substore/domain.txt)
+                    local api=$(cat /root/docker/substore/api_path.txt)
+                    echo -e "  🌐 面板访问地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api${NC}"
+                else
+                    log_warn "未找到访问信息文件，可能尚未部署或数据已丢失。"
+                fi
+                press_enter ;;
+            6)
+                echo -e "${YELLOW}警告：这将删除 Sub-Store 容器及所有配置数据！${NC}"
+                read -rp "确认卸载？(y/N): " un_sub
+                if [[ "${un_sub,,}" == "y" ]]; then
+                    if command -v docker >/dev/null 2>&1; then
+                        docker stop substore 2>/dev/null || true
+                        docker rm substore 2>/dev/null || true
+                    fi
+                    rm -rf /root/docker/substore
+                    rm -f /etc/nginx/conf.d/substore.conf
+                    systemctl reload nginx 2>/dev/null || true
+                    log_success "Sub-Store 已被彻底卸载。"
+                fi
+                press_enter ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_manage_wallos() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ 管理 Wallos ══${NC}"
+        echo ""
+        local status_str="${RED}○ 未安装${NC}"
+        if command -v docker >/dev/null 2>&1; then
+            if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+                if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+                    status_str="${GREEN}● 运行中${NC}"
+                else
+                    status_str="${YELLOW}● 已停止${NC}"
+                fi
+            fi
+        fi
+
+        echo -e "  服务状态: $status_str"
+        echo ""
+        echo "  1) 启动 Wallos"
+        echo "  2) 停止 Wallos"
+        echo "  3) 重启 Wallos"
+        echo "  4) 查看实时日志"
+        echo "  5) 查看面板访问地址"
+        echo "  6) 彻底卸载并删除数据"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
+        case $opt in
+            1) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^wallos$"; then
+                    docker start wallos 2>/dev/null && log_success "已启动" || log_error "启动失败"
+                else
+                    log_error "未找到容器，请先在「三、安装服务」中部署"
+                fi
+                press_enter ;;
+            2) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^wallos$"; then
+                    docker stop wallos 2>/dev/null && log_success "已停止" || log_error "停止失败"
+                else
+                    log_error "未找到容器"
+                fi
+                press_enter ;;
+            3) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^wallos$"; then
+                    docker restart wallos 2>/dev/null && log_success "已重启" || log_error "重启失败"
+                else
+                    log_error "未找到容器"
+                fi
+                press_enter ;;
+            4) 
+                if command -v docker >/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^wallos$"; then
+                    docker logs -f wallos 2>/dev/null
+                else
+                    log_error "未找到容器"
+                    press_enter
+                fi
+                ;;
+            5)
+                if [[ -f /root/docker/wallos/domain.txt ]]; then
+                    local sn=$(cat /root/docker/wallos/domain.txt)
+                    echo -e "  🌐 面板访问地址: ${GREEN}https://$sn:8443${NC}"
+                else
+                    log_warn "未找到访问信息文件，可能尚未部署或数据已丢失。"
+                fi
+                press_enter ;;
+            6)
+                echo -e "${YELLOW}警告：这将删除 Wallos 容器及所有配置数据！${NC}"
+                read -rp "确认卸载？(y/N): " un_wal
+                if [[ "${un_wal,,}" == "y" ]]; then
+                    if command -v docker >/dev/null 2>&1; then
+                        docker stop wallos 2>/dev/null || true
+                        docker rm wallos 2>/dev/null || true
+                    fi
+                    rm -rf /root/docker/wallos
+                    rm -f /etc/nginx/conf.d/wallos.conf
+                    systemctl reload nginx 2>/dev/null || true
+                    log_success "Wallos 已被彻底卸载。"
+                fi
+                press_enter ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
 menu_service() {
     while true; do
         clear
@@ -2865,7 +3043,7 @@ menu_service() {
         if systemctl is-active --quiet sing-box 2>/dev/null; then
             status_str="${GREEN}● 运行中${NC}"
         else
-            status_str="${RED}○ 已停止${NC}"
+            status_str="${RED}○ 已停止 / 未配置${NC}"
         fi
         echo -e "  sing-box 状态: $status_str"
         echo ""
@@ -2899,24 +3077,52 @@ menu_service() {
         read -rp "请选择 (默认 0): " opt
         opt=${opt:-0}
         case $opt in
-            1) systemctl start sing-box && log_success "sing-box 已启动"; press_enter ;;
-            2) systemctl stop sing-box && log_success "sing-box 已停止"; press_enter ;;
+            1) 
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    systemctl start sing-box && log_success "sing-box 已启动"
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
+                press_enter ;;
+            2) 
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    systemctl stop sing-box && log_success "sing-box 已停止"
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
+                press_enter ;;
             3)
-                systemctl restart sing-box
-                echo ""
-                systemctl status sing-box --no-pager
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    systemctl restart sing-box
+                    echo ""
+                    systemctl status sing-box --no-pager || true
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
                 press_enter ;;
-            4) systemctl status sing-box; press_enter ;;
-            5) systemctl enable sing-box && log_success "已设为开机自启"; press_enter ;;
-            6) systemctl disable sing-box && log_success "已取消开机自启"; press_enter ;;
+            4) 
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    systemctl status sing-box --no-pager || true
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
+                press_enter ;;
+            5) 
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    systemctl enable sing-box && log_success "已设为开机自启"
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
+                press_enter ;;
+            6) 
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    systemctl disable sing-box && log_success "已取消开机自启"
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
+                press_enter ;;
             7)
-                if systemctl is-enabled --quiet sing-box 2>/dev/null; then
-                    log_success "sing-box 已设为开机自启"
-                else
-                    log_warn "sing-box 未设为开机自启"
-                fi
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    if systemctl is-enabled --quiet sing-box 2>/dev/null; then
+                        log_success "sing-box 已设为开机自启"
+                    else
+                        log_warn "sing-box 未设为开机自启"
+                    fi
+                else log_error "未安装 sing-box，请先在主菜单安装"; fi
                 press_enter ;;
-            8) journalctl -u sing-box -f --no-pager ;;
+            8) 
+                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                    journalctl -u sing-box -f --no-pager
+                else log_error "未安装 sing-box，请先在主菜单安装"; press_enter; fi
+                ;;
             9)
                 if command -v sing-box &>/dev/null; then
                     local _sc_out
@@ -2950,15 +3156,31 @@ menu_service() {
                 if command -v nginx &>/dev/null; then
                     systemctl restart nginx
                     echo ""
-                    systemctl status nginx --no-pager
+                    systemctl status nginx --no-pager || true
                 else
                     log_error "Nginx 未安装"
                 fi
                 press_enter ;;
-            13) systemctl start  nginx && log_success "Nginx 已启动"; press_enter ;;
-            14) systemctl stop   nginx && log_success "Nginx 已停止"; press_enter ;;
-            15) systemctl enable nginx && log_success "Nginx 已设为开机自启"; press_enter ;;
-            16) tail -f /var/log/nginx/error.log ;;
+            13) 
+                if command -v nginx &>/dev/null; then
+                    systemctl start nginx && log_success "Nginx 已启动"
+                else log_error "Nginx 未安装"; fi
+                press_enter ;;
+            14) 
+                if command -v nginx &>/dev/null; then
+                    systemctl stop nginx && log_success "Nginx 已停止"
+                else log_error "Nginx 未安装"; fi
+                press_enter ;;
+            15) 
+                if command -v nginx &>/dev/null; then
+                    systemctl enable nginx && log_success "Nginx 已设为开机自启"
+                else log_error "Nginx 未安装"; fi
+                press_enter ;;
+            16) 
+                if [[ -f /var/log/nginx/error.log ]]; then
+                    tail -f /var/log/nginx/error.log
+                else log_error "日志文件不存在或 Nginx 未安装"; press_enter; fi
+                ;;
             17) menu_manage_substore ;;
             18) menu_manage_wallos ;;
             19) menu_manage_realm ;;
