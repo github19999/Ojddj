@@ -24,6 +24,9 @@
 #   9. 证书服务冲突修复：重构了 manage_web_services_ssl 函数，彻底解决安装 Nginx 后
 #      申请证书触发 set -e 导致脚本中断的致命 BUG；并且修复了提前停用导致
 #      acme 续订自动 Hook 漏配的潜在问题。
+#  10. 证书续期智能进化：无论用户是先申请证书再安装 Nginx，还是先安装 Nginx 再申请，
+#      都会植入动态状态监测 Hook（vpsge_hook.sh）。未来的每次定时续期都会实时侦测
+#      Web端口占用状态并智能停启，彻底告别端口冲突导致的续期失败！
 # ================================================================
 
 # 遇到错误立即退出
@@ -771,13 +774,45 @@ deploy_ssl() {
 
     manage_web_services_ssl "stop"
     open_firewall_ports
+    
+    log_info "配置智能续期 Hook，确保未来 Web 服务的无缝证书自动续期..."
+    cat > /root/.acme.sh/vpsge_hook.sh << 'EOF'
+#!/bin/bash
+ACTION=$1
+SERVICES="nginx apache2 httpd lighttpd caddy"
+
+if [ "$ACTION" == "pre" ]; then
+    for svc in $SERVICES; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            systemctl stop "$svc" 2>/dev/null || true
+            touch "/tmp/.vpsge_${svc}_stopped"
+        fi
+    done
+elif [ "$ACTION" == "post" ]; then
+    for svc in $SERVICES; do
+        if [ -f "/tmp/.vpsge_${svc}_stopped" ]; then
+            systemctl start "$svc" 2>/dev/null || true
+            rm -f "/tmp/.vpsge_${svc}_stopped"
+        fi
+    done
+elif [ "$ACTION" == "reload" ]; then
+    for svc in $SERVICES; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
+        fi
+    done
+fi
+EOF
+    chmod +x /root/.acme.sh/vpsge_hook.sh
 
     log_step "申请证书（Standalone 模式）..."
     local domain_args=""
     for d in "${DOMAINS[@]}"; do domain_args="$domain_args -d $d"; done
 
     echo "正在申请证书，请耐心等待..."
-    if /root/.acme.sh/acme.sh --issue $domain_args --standalone --force; then
+    if /root/.acme.sh/acme.sh --issue $domain_args --standalone --force \
+        --pre-hook "/root/.acme.sh/vpsge_hook.sh pre" \
+        --post-hook "/root/.acme.sh/vpsge_hook.sh post"; then
         log_success "SSL 证书申请成功"
     else
         log_error "SSL 证书申请失败"
@@ -794,28 +829,7 @@ deploy_ssl() {
     local KEY_FILE="$CERT_DIR/private.key"
     local CERT_FILE="$CERT_DIR/fullchain.cer"
     local CA_FILE="$CERT_DIR/ca.cer"
-
-    local DETECTED_SVC="" PRE_HOOK="" POST_HOOK=""
-    local RELOAD_CMD="echo 'Certificate installed'"
-
-    if [[ ${#STOPPED_SERVICES_SSL[@]} -gt 0 ]]; then
-        DETECTED_SVC="${STOPPED_SERVICES_SSL[0]}"
-        PRE_HOOK="systemctl stop $DETECTED_SVC"
-        POST_HOOK="systemctl start $DETECTED_SVC"
-        RELOAD_CMD="systemctl reload $DETECTED_SVC"
-        log_info "检测到刚才为您停用的 Web 服务: $DETECTED_SVC，将为您配置自动续期 Hook"
-    else
-        for svc in nginx apache2 httpd lighttpd caddy; do
-            if systemctl list-unit-files | grep -q "^${svc}.service" 2>/dev/null || command -v "$svc" >/dev/null 2>&1; then
-                DETECTED_SVC="$svc"
-                PRE_HOOK="systemctl stop $svc"
-                POST_HOOK="systemctl start $svc"
-                RELOAD_CMD="systemctl reload $svc"
-                log_info "检测到您已安装了 Web 服务: $svc，将为您配置自动续期 Hook"
-                break
-            fi
-        done
-    fi
+    local RELOAD_CMD="/root/.acme.sh/vpsge_hook.sh reload"
 
     if /root/.acme.sh/acme.sh --install-cert -d "$MAIN_DOMAIN" \
         --key-file  "$KEY_FILE"  \
@@ -833,18 +847,7 @@ deploy_ssl() {
         return 1
     fi
 
-    if [[ -n "$PRE_HOOK" ]]; then
-        local CONF_FILE="/root/.acme.sh/${MAIN_DOMAIN}/${MAIN_DOMAIN}.conf"
-        if [[ -f "$CONF_FILE" ]]; then
-            if ! grep -q "Le_PreHook" "$CONF_FILE"; then
-                echo "Le_PreHook='$PRE_HOOK'"   >> "$CONF_FILE"
-                echo "Le_PostHook='$POST_HOOK'" >> "$CONF_FILE"
-                log_success "续期 Hook 已配置（续期时将自动停启 $DETECTED_SVC）"
-            fi
-        fi
-    else
-        log_info "未检测到已安装的 Web 服务，续期将直接使用 Standalone 模式"
-    fi
+    log_success "智能续期 Hook 注册完成。未来无论您何时安装 Nginx 等服务，续期程序均会自动感知并智能避让防冲突。"
 
     log_step "设置证书自动续期..."
     local LOG_FILE="/var/log/acme-renew.log"
