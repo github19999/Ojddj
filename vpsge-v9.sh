@@ -21,6 +21,9 @@
 #      已在 Python 解析核心中增加防 IP 污染及脏字符剥离过滤，实现 100% 无损还原)。
 #   8. 服务报错修复：修复了在未安装组件时，从服务管理启停引发的 systemctl 报错问题；
 #      补全了遗失的 Sub-Store 和 Wallos 服务面板管理模块。
+#   9. 证书服务冲突修复：重构了 manage_web_services_ssl 函数，彻底解决安装 Nginx 后
+#      申请证书触发 set -e 导致脚本中断的致命 BUG；并且修复了提前停用导致
+#      acme 续订自动 Hook 漏配的潜在问题。
 # ================================================================
 
 # 遇到错误立即退出
@@ -349,7 +352,7 @@ setup_ssh_key() {
     chmod 600 /root/.ssh/authorized_keys
     chown root:root /root/.ssh/authorized_keys
 
-    command -v restorecon &>/dev/null && restorecon -Rv /root/.ssh/ >/dev/null 2>&1 && log_info "SELinux 上下文已修复"
+    command -v restorecon &>/dev/null && { restorecon -Rv /root/.ssh/ >/dev/null 2>&1 && log_info "SELinux 上下文已修复"; } || true
     log_success "SSH 密钥登录配置完成"
 }
 
@@ -579,19 +582,19 @@ STOPPED_SERVICES_SSL=()
 manage_web_services_ssl() {
     local action="$1"
     if [[ "$action" == "stop" ]]; then
-        local port_info=""
-        command -v ss &>/dev/null && port_info=$(ss -tlnp | grep ":80 " 2>/dev/null) || true
-        command -v netstat &>/dev/null && [[ -z "$port_info" ]] && port_info=$(netstat -tlnp | grep ":80 " 2>/dev/null) || true
-        if [[ -n "$port_info" ]]; then
-            for svc in nginx apache2 httpd lighttpd caddy; do
-                systemctl is-active --quiet "$svc" 2>/dev/null && {
-                    systemctl stop "$svc" && STOPPED_SERVICES_SSL+=("$svc") && log_info "已停止: $svc"
-                }
-            done
-        fi
+        for svc in nginx apache2 httpd lighttpd caddy; do
+            if systemctl is-active --quiet "$svc" 2>/dev/null; then
+                systemctl stop "$svc" 2>/dev/null || true
+                STOPPED_SERVICES_SSL+=("$svc")
+                log_info "已停止冲突服务: $svc"
+            fi
+        done
     elif [[ "$action" == "start" ]]; then
         for svc in "${STOPPED_SERVICES_SSL[@]:-}"; do
-            [[ -n "$svc" ]] && systemctl start "$svc" 2>/dev/null && log_info "已启动: $svc"
+            if [[ -n "$svc" ]]; then
+                systemctl start "$svc" 2>/dev/null || true
+                log_info "已重新启动: $svc"
+            fi
         done
         STOPPED_SERVICES_SSL=()
     fi
@@ -795,16 +798,24 @@ deploy_ssl() {
     local DETECTED_SVC="" PRE_HOOK="" POST_HOOK=""
     local RELOAD_CMD="echo 'Certificate installed'"
 
-    for svc in nginx apache2 httpd lighttpd; do
-        if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            DETECTED_SVC="$svc"
-            PRE_HOOK="systemctl stop $svc"
-            POST_HOOK="systemctl start $svc"
-            RELOAD_CMD="systemctl reload $svc"
-            log_info "检测到 Web 服务: $svc，将配置自动续期 Hook"
-            break
-        fi
-    done
+    if [[ ${#STOPPED_SERVICES_SSL[@]} -gt 0 ]]; then
+        DETECTED_SVC="${STOPPED_SERVICES_SSL[0]}"
+        PRE_HOOK="systemctl stop $DETECTED_SVC"
+        POST_HOOK="systemctl start $DETECTED_SVC"
+        RELOAD_CMD="systemctl reload $DETECTED_SVC"
+        log_info "检测到刚才为您停用的 Web 服务: $DETECTED_SVC，将为您配置自动续期 Hook"
+    else
+        for svc in nginx apache2 httpd lighttpd caddy; do
+            if systemctl list-unit-files | grep -q "^${svc}.service" 2>/dev/null || command -v "$svc" >/dev/null 2>&1; then
+                DETECTED_SVC="$svc"
+                PRE_HOOK="systemctl stop $svc"
+                POST_HOOK="systemctl start $svc"
+                RELOAD_CMD="systemctl reload $svc"
+                log_info "检测到您已安装了 Web 服务: $svc，将为您配置自动续期 Hook"
+                break
+            fi
+        done
+    fi
 
     if /root/.acme.sh/acme.sh --install-cert -d "$MAIN_DOMAIN" \
         --key-file  "$KEY_FILE"  \
@@ -832,7 +843,7 @@ deploy_ssl() {
             fi
         fi
     else
-        log_info "未检测到运行中的 Web 服务，续期将直接使用 Standalone 模式"
+        log_info "未检测到已安装的 Web 服务，续期将直接使用 Standalone 模式"
     fi
 
     log_step "设置证书自动续期..."
