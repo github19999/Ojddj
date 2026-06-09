@@ -93,7 +93,7 @@ gen_naive_username() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  通用输入函数 (含自动默认支持)
+#  通用输入函数 (含自动默认支持 & 重装检测)
 # ────────────────────────────────────────────────────────────────
 ask_val() {
     local varname="$1"
@@ -142,6 +142,25 @@ ask_random() {
 ask() {
     local prompt="$1" default="$2"
     ask_val REPLY_VAL "$prompt" "$default"
+}
+
+prompt_reinstall() {
+    local svc_name="$1"
+    echo -e "\n  ${YELLOW}检测到 ${svc_name} 已经部署过了！${NC}"
+    echo "  1) 不重新安装 (保留现有) [默认]"
+    echo "  2) 重新安装 (覆盖更新)"
+    local choice
+    # 支持10秒倒计时，到期自动选择 1，不阻塞全自动流程
+    read -t 10 -rp "  > 请选择 (1-2, 10秒后默认 1): " choice || true
+    choice=${choice:-1}
+    echo ""
+    if [[ "$choice" == "1" ]]; then
+        log_info "已选择跳过 ${svc_name}，继续后续操作。"
+        return 1 # Skip
+    else
+        log_info "准备重新部署 ${svc_name}..."
+        return 0 # Reinstall
+    fi
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -898,15 +917,8 @@ install_nginx() {
     if command -v nginx &>/dev/null; then
         local ver
         ver=$(nginx -v 2>&1 | head -1)
-        log_info "Nginx 已安装: $ver"
-        if [[ "$AUTO_DEFAULT" != "true" ]]; then
-            read -rp "是否重新安装？(y/N): " yn
-            if [[ "${yn,,}" != "y" ]]; then
-                return
-            fi
-        else
-            return
-        fi
+        log_info "当前已安装版本: $ver"
+        if ! prompt_reinstall "Nginx"; then return 0; fi
     fi
     
     if [[ "$mode" == "2" ]]; then
@@ -917,9 +929,10 @@ install_nginx() {
     fi
 
     if [[ "$PKG_MANAGER" == "apt" ]]; then
-        apt update -y && apt install -y nginx
+        apt update -y >/dev/null 2>&1 || true
+        apt install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     else
-        $PKG_MANAGER install -y nginx
+        $PKG_MANAGER install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     fi
     
     mkdir -p /var/www/html /etc/nginx/conf.d
@@ -957,7 +970,11 @@ install_docker_env() {
         fi
         rm -f get-docker.sh
     else
-        log_success "Docker 已安装"
+        if ! prompt_reinstall "Docker 环境"; then
+            systemctl enable docker >/dev/null 2>&1 || true
+            systemctl start docker >/dev/null 2>&1 || true
+            return 0
+        fi
     fi
     systemctl enable docker >/dev/null 2>&1
     systemctl start docker >/dev/null 2>&1
@@ -967,27 +984,26 @@ install_docker_env() {
         if [[ "$PKG_MANAGER" == "apt" ]]; then apt update -y && apt install -y docker-compose-plugin
         else $PKG_MANAGER install -y docker-compose-plugin; fi
     else
-        log_success "Docker Compose 已安装"
+        log_success "Docker Compose 已就绪"
     fi
 }
 
 install_substore() {
     local sub_ver_choice="${1:-1}"
     
-    # 部署前进行检测，避免误操作导致重新部署覆盖
     if [[ -d /root/docker/substore ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
         log_warn "检测到您的服务器中 Sub-Store 已经部署过了！"
         if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
-            local sn=$(cat /root/docker/substore/domain.txt)
-            local api=$(cat /root/docker/substore/api_path.txt)
+            local p_sn=$(cat /root/docker/substore/domain.txt)
+            local p_api=$(cat /root/docker/substore/api_path.txt)
             echo ""
-            echo -e "  🌐 为您找回的面板访问地址: "
-            echo -e "  ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api${NC}"
+            echo -e "  🌐 为您找回的旧面板访问地址: "
+            echo -e "  ${GREEN}https://$p_sn:8443/?api=https://$p_sn:8443/$p_api${NC}"
             echo ""
         fi
-        log_info "为防止您的数据由于误操作被覆盖，本次部署动作已被系统拦截取消。"
-        log_info "如确需重新部署或彻底删除旧数据，请前往「五、服务管理 -> 管理 Sub-Store」中操作。"
-        return
+        if ! prompt_reinstall "Sub-Store"; then return 0; fi
+        docker stop substore 2>/dev/null || true
+        docker rm substore 2>/dev/null || true
     fi
 
     install_docker_env 1
@@ -996,7 +1012,7 @@ install_substore() {
         install_nginx 1
     fi
 
-    # 【依赖防漏优化】确保 unzip 已经安装，防止由于未执行预装组件导致的部署闪退
+    # 【依赖防漏优化】确保 unzip 已经安装
     if ! command -v unzip >/dev/null 2>&1; then
         log_info "正在为您自动安装必要的 unzip 解压工具..."
         if [[ "$PKG_MANAGER" == "apt" ]]; then
@@ -1034,12 +1050,12 @@ install_substore() {
         [[ -n "$pre_front" ]] && frontend_url="$pre_front"
     fi
 
-    # 新增旧链接导入智能提取逻辑
+    # 新增：智能解析与导入旧面板链接，无缝迁移数据
     local old_sub_domain=""
     local old_sub_api=""
     if [[ "$AUTO_DEFAULT" != "true" ]]; then
-        echo -e "${CYAN}是否需要导入旧的 Sub-Store 链接以保持配置参数(原域名/API路径)不变？${NC}"
-        echo "  1) 是，导入旧链接 (手动粘贴)"
+        echo -e "\n${CYAN}是否需要导入旧的 Sub-Store 链接以保持配置参数(原域名/API路径)不变？${NC}"
+        echo "  1) 是，导入旧链接 (无缝迁移)"
         echo "  2) 否，生成全新配置 [默认]"
         read -rp "请选择 (1-2) [默认 2]: " import_sub
         if [[ "$import_sub" == "1" ]]; then
@@ -1056,10 +1072,21 @@ install_substore() {
         fi
     fi
 
+    # 核心优化：若识别到旧域名，智能切换为 AUTO 模式直接挂载同域名证书，彻底免除二次确认烦恼
+    local restore_auto=false
+    if [[ -n "$old_sub_domain" && "$AUTO_DEFAULT" != "true" ]]; then
+        AUTO_DEFAULT="true"
+        restore_auto=true
+    fi
+
     select_server_name "sub.example.com" "$old_sub_domain"
     local sn="$SELECTED_SN"
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    if [[ "$restore_auto" == "true" ]]; then
+        AUTO_DEFAULT="false"
+    fi
 
     mkdir -p /root/docker/substore/data
     cd /root/docker/substore
@@ -1083,7 +1110,7 @@ install_substore() {
     curl -fsSL -L "$backend_url" -o sub-store.bundle.js
     curl -fsSL -L "$frontend_url" -o dist.zip
     
-    # 【优化9】重构高兼容性解压逻辑，彻底解决前端寻址失败（Cannot GET /）问题
+    # 高兼容性解压逻辑，彻底解决前端寻址失败（Cannot GET /）问题
     rm -rf frontend dist_tmp
     unzip -qo dist.zip -d dist_tmp
     if [[ -d "dist_tmp/dist" ]]; then
@@ -1173,6 +1200,17 @@ install_wallos() {
     local wallos_mode="${1:-1}"
     local wallos_ver="2.36.2"
     
+    if [[ -d /root/docker/wallos ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+        log_warn "检测到您的服务器中 Wallos 已经部署过了！"
+        if [[ -f /root/docker/wallos/domain.txt ]]; then
+            local w_sn=$(cat /root/docker/wallos/domain.txt)
+            echo -e "  🌐 为您找回的旧面板访问地址: ${GREEN}https://$w_sn:8443${NC}"
+        fi
+        if ! prompt_reinstall "Wallos"; then return 0; fi
+        docker stop wallos 2>/dev/null || true
+        docker rm wallos 2>/dev/null || true
+    fi
+
     if [[ "$wallos_mode" == "1" ]]; then
         wallos_ver="latest"
     elif [[ "$wallos_mode" == "2" ]]; then
@@ -1192,8 +1230,8 @@ install_wallos() {
 
     local old_wal_domain=""
     if [[ "$AUTO_DEFAULT" != "true" ]]; then
-        echo -e "${CYAN}是否需要导入旧的 Wallos 链接以保持配置参数(原域名)不变？${NC}"
-        echo "  1) 是，导入旧链接 (手动粘贴)"
+        echo -e "\n${CYAN}是否需要导入旧的 Wallos 链接以保持配置参数(原域名)不变？${NC}"
+        echo "  1) 是，导入旧链接 (无缝迁移)"
         echo "  2) 否，生成全新配置 [默认]"
         read -rp "请选择 (1-2) [默认 2]: " import_wal
         if [[ "$import_wal" == "1" ]]; then
@@ -1209,12 +1247,19 @@ install_wallos() {
         fi
     fi
 
+    # 同理：导入旧链接时，开启 AUTO 模式直接使用旧证书防误触
+    local restore_auto=false
+    if [[ -n "$old_wal_domain" && "$AUTO_DEFAULT" != "true" ]]; then
+        AUTO_DEFAULT="true"
+        restore_auto=true
+    fi
+
     local sn=""
-    # 强制排查 Wallos 域名是否与 Sub-Store 重复
     while true; do
         select_server_name "wallos.example.com" "$old_wal_domain" "true"
         sn="$SELECTED_SN"
         
+        # 强制排查 Wallos 域名是否与 Sub-Store 重复
         if [[ -f /root/docker/substore/domain.txt ]]; then
             local sub_sn=$(cat /root/docker/substore/domain.txt)
             if [[ "$sn" == "$sub_sn" ]]; then
@@ -1224,6 +1269,7 @@ install_wallos() {
                 echo ""
                 if [[ "$AUTO_DEFAULT" == "true" ]]; then
                     AUTO_DEFAULT=false
+                    old_wal_domain=""
                 fi
                 continue
             fi
@@ -1233,6 +1279,10 @@ install_wallos() {
 
     ask_cert_paths "$sn"
     local cp="$CERT_PATH" kp="$KEY_PATH"
+
+    if [[ "$restore_auto" == "true" ]]; then
+        AUTO_DEFAULT="false"
+    fi
 
     mkdir -p /root/docker/wallos/{db,logos}
     cd /root/docker/wallos
@@ -1299,6 +1349,11 @@ EOF
 
 # ----------------- Realm 端口转发功能模块 -----------------
 deploy_realm() {
+    if [[ -f "/root/realm/realm" ]]; then
+        if ! prompt_reinstall "Realm"; then return 0; fi
+        systemctl stop realm 2>/dev/null || true
+    fi
+
     log_step "部署 Realm 端口转发环境"
     mkdir -p /root/realm
     cd /root/realm || return 1
@@ -1502,7 +1557,7 @@ menu_install_service() {
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
         echo -e " ${YELLOW}101) 全部手动执行 (所有服务)${NC}"
-        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7，默认 0）${NC}"
+        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 160，默认 0）${NC}"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -1511,15 +1566,19 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
+            # 完全自动安装
             SVC_CHOICES=(1 4 7 10 14 160)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
+            # 全部手动安装（各环节等待用户确认）
             SVC_CHOICES=(1 4 7 10 14 160)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
-            read -rp "请输入服务（例如 1 4 7，默认 0）: " -a SVC_CHOICES
+            # 自定义批量安装
+            read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
             AUTO_DEFAULT=false
         else
+            # 传统单项安装
             read -ra SVC_CHOICES <<< "$vc_raw"
             AUTO_DEFAULT=false
         fi
@@ -1539,11 +1598,25 @@ menu_install_service() {
             case $vc in
                 0) return ;;
                 1|2|3)
+                    if command -v sing-box &>/dev/null; then
+                        local ver
+                        ver=$(sing-box version 2>/dev/null | head -1)
+                        log_info "当前已安装版本: $ver"
+                        if ! prompt_reinstall "sing-box"; then
+                            [[ "$is_batch" == "false" ]] && press_enter
+                            continue
+                        fi
+                    fi
+
                     if [[ "$vc" == "1" ]]; then
                         log_step "安装 sing-box 最新稳定版..."
-                        bash <(curl -fsSL https://sing-box.app/deb-install.sh) || \
-                        bash <(curl -fsSL https://sing-box.app/rpm-install.sh) || \
-                        { log_error "安装失败，请检查网络或手动安装"; [[ "$is_batch" == "false" ]] && press_enter; continue; }
+                        if ! bash <(curl -fsSL https://sing-box.app/deb-install.sh); then
+                            if ! bash <(curl -fsSL https://sing-box.app/rpm-install.sh); then
+                                log_error "安装失败，请检查网络或手动安装"
+                                [[ "$is_batch" == "false" ]] && press_enter
+                                continue
+                            fi
+                        fi
                     elif [[ "$vc" == "2" ]]; then
                         echo -n "请输入版本号（例如 1.9.0）: "
                         read -r SB_VER
@@ -1558,14 +1631,21 @@ menu_install_service() {
                             *) ARCH_STR="amd64" ;;
                         esac
                         local URL="https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/sing-box-${SB_VER}-linux-${ARCH_STR}.tar.gz"
-                        curl -fsSL "$URL" -o /tmp/sing-box.tar.gz || { log_error "下载失败"; [[ "$is_batch" == "false" ]] && press_enter; continue; }
+                        if ! curl -fsSL "$URL" -o /tmp/sing-box.tar.gz; then
+                            log_error "下载失败"
+                            [[ "$is_batch" == "false" ]] && press_enter
+                            continue
+                        fi
                         tar -xzf /tmp/sing-box.tar.gz -C /tmp/
                         install -m 755 "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}/sing-box" /usr/local/bin/sing-box
                         rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SB_VER}-linux-${ARCH_STR}"
                     elif [[ "$vc" == "3" ]]; then
                         log_step "安装 sing-box Beta 版..."
-                        bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta || \
-                        { log_error "Beta 安装失败"; [[ "$is_batch" == "false" ]] && press_enter; continue; }
+                        if ! bash <(curl -fsSL https://sing-box.app/deb-install.sh) beta; then
+                            log_error "Beta 安装失败"
+                            [[ "$is_batch" == "false" ]] && press_enter
+                            continue
+                        fi
                     fi
 
                     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
@@ -1617,10 +1697,14 @@ EOF
                 15) install_wallos 3; [[ "$is_batch" == "false" ]] && press_enter ;;
                 16) menu_manage_realm ;;
                 160) deploy_realm; [[ "$is_batch" == "false" ]] && press_enter ;;
-                *) log_warn "无效选择: $vc"; sleep 1 ;;
+                *) log_warn "未知选项或服务: $vc，跳过"; sleep 1 ;;
             esac
         done
-        [[ "$is_batch" == "true" ]] && press_enter
+
+        if [[ "$is_batch" == "true" ]]; then
+            log_success "所有指定的安装步骤均已执行完毕！"
+            press_enter
+        fi
     done
 }
 
