@@ -1055,10 +1055,20 @@ install_substore() {
     local old_sub_api=""
     if [[ "$AUTO_DEFAULT" != "true" ]]; then
         echo -e "\n${CYAN}是否需要导入旧的 Sub-Store 链接以保持配置参数(原域名/API路径)不变？${NC}"
-        echo "  1) 是，导入旧链接 (无缝迁移)"
+        echo "  1) 自动读取本地旧配置 (无缝迁移)"
         echo "  2) 否，生成全新配置 [默认]"
-        read -rp "请选择 (1-2) [默认 2]: " import_sub
+        echo "  3) 导入旧链接 (手动粘贴)"
+        read -rp "请选择 (1-3) [默认 2]: " import_sub
+        
         if [[ "$import_sub" == "1" ]]; then
+            if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+                old_sub_domain=$(cat /root/docker/substore/domain.txt)
+                old_sub_api=$(cat /root/docker/substore/api_path.txt)
+                log_success "成功读取本地旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
+            else
+                log_warn "未发现本地旧配置，将生成全新配置。"
+            fi
+        elif [[ "$import_sub" == "3" ]]; then
             read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
             if [[ -n "$old_sub_link" ]]; then
                 if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
@@ -1072,20 +1082,24 @@ install_substore() {
         fi
     fi
 
-    # 核心优化：若识别到旧域名，智能切换为 AUTO 模式直接挂载同域名证书，彻底免除二次确认烦恼
-    local restore_auto=false
-    if [[ -n "$old_sub_domain" && "$AUTO_DEFAULT" != "true" ]]; then
+    local sn=""
+    local cp=""
+    local kp=""
+    # 核心优化：若识别到旧域名，完全跳过域名和证书确认，后台静默强行抓取挂载对应证书
+    if [[ -n "$old_sub_domain" ]]; then
+        sn="$old_sub_domain"
+        local prev_auto="$AUTO_DEFAULT"
         AUTO_DEFAULT="true"
-        restore_auto=true
-    fi
-
-    select_server_name "sub.example.com" "$old_sub_domain"
-    local sn="$SELECTED_SN"
-    ask_cert_paths "$sn"
-    local cp="$CERT_PATH" kp="$KEY_PATH"
-
-    if [[ "$restore_auto" == "true" ]]; then
-        AUTO_DEFAULT="false"
+        ask_cert_paths "$sn"
+        cp="$CERT_PATH"
+        kp="$KEY_PATH"
+        AUTO_DEFAULT="$prev_auto"
+    else
+        select_server_name "sub.example.com" ""
+        sn="$SELECTED_SN"
+        ask_cert_paths "$sn"
+        cp="$CERT_PATH"
+        kp="$KEY_PATH"
     fi
 
     mkdir -p /root/docker/substore/data
@@ -1231,10 +1245,19 @@ install_wallos() {
     local old_wal_domain=""
     if [[ "$AUTO_DEFAULT" != "true" ]]; then
         echo -e "\n${CYAN}是否需要导入旧的 Wallos 链接以保持配置参数(原域名)不变？${NC}"
-        echo "  1) 是，导入旧链接 (无缝迁移)"
+        echo "  1) 自动读取本地旧配置 (无缝迁移)"
         echo "  2) 否，生成全新配置 [默认]"
-        read -rp "请选择 (1-2) [默认 2]: " import_wal
+        echo "  3) 导入旧链接 (手动粘贴)"
+        read -rp "请选择 (1-3) [默认 2]: " import_wal
+        
         if [[ "$import_wal" == "1" ]]; then
+            if [[ -f /root/docker/wallos/domain.txt ]]; then
+                old_wal_domain=$(cat /root/docker/wallos/domain.txt)
+                log_success "成功读取本地旧配置: 域名=$old_wal_domain"
+            else
+                log_warn "未发现本地旧配置，将生成全新配置。"
+            fi
+        elif [[ "$import_wal" == "3" ]]; then
             read -rp "请粘贴旧的 Wallos 面板链接 (例如 https://wallos.xxx.com:8443): " old_wal_link
             if [[ -n "$old_wal_link" ]]; then
                 if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
@@ -1247,41 +1270,42 @@ install_wallos() {
         fi
     fi
 
-    # 同理：导入旧链接时，开启 AUTO 模式直接使用旧证书防误触
-    local restore_auto=false
-    if [[ -n "$old_wal_domain" && "$AUTO_DEFAULT" != "true" ]]; then
-        AUTO_DEFAULT="true"
-        restore_auto=true
-    fi
-
     local sn=""
-    while true; do
-        select_server_name "wallos.example.com" "$old_wal_domain" "true"
-        sn="$SELECTED_SN"
-        
-        # 强制排查 Wallos 域名是否与 Sub-Store 重复
-        if [[ -f /root/docker/substore/domain.txt ]]; then
-            local sub_sn=$(cat /root/docker/substore/domain.txt)
-            if [[ "$sn" == "$sub_sn" ]]; then
-                echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名 ($sn) 已经被您部署的 Sub-Store 占用。${NC}"
-                echo -e "${YELLOW}由于 Nginx 根目录分配限制，Wallos 必须使用与 Sub-Store 不同的二级域名（例如 wallos.yourdomain.com）。${NC}"
-                echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
-                echo ""
-                if [[ "$AUTO_DEFAULT" == "true" ]]; then
-                    AUTO_DEFAULT=false
-                    old_wal_domain=""
+    local cp=""
+    local kp=""
+    # 强制跳过确认，自动应用旧域名和证书
+    if [[ -n "$old_wal_domain" ]]; then
+        sn="$old_wal_domain"
+        local prev_auto="$AUTO_DEFAULT"
+        AUTO_DEFAULT="true"
+        ask_cert_paths "$sn"
+        cp="$CERT_PATH"
+        kp="$KEY_PATH"
+        AUTO_DEFAULT="$prev_auto"
+    else
+        while true; do
+            select_server_name "wallos.example.com" "" "true"
+            sn="$SELECTED_SN"
+            
+            # 强制排查 Wallos 域名是否与 Sub-Store 重复
+            if [[ -f /root/docker/substore/domain.txt ]]; then
+                local sub_sn=$(cat /root/docker/substore/domain.txt)
+                if [[ "$sn" == "$sub_sn" ]]; then
+                    echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名 ($sn) 已经被您部署的 Sub-Store 占用。${NC}"
+                    echo -e "${YELLOW}由于 Nginx 根目录分配限制，Wallos 必须使用与 Sub-Store 不同的二级域名（例如 wallos.yourdomain.com）。${NC}"
+                    echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
+                    echo ""
+                    if [[ "$AUTO_DEFAULT" == "true" ]]; then
+                        AUTO_DEFAULT=false
+                    fi
+                    continue
                 fi
-                continue
             fi
-        fi
-        break
-    done
-
-    ask_cert_paths "$sn"
-    local cp="$CERT_PATH" kp="$KEY_PATH"
-
-    if [[ "$restore_auto" == "true" ]]; then
-        AUTO_DEFAULT="false"
+            break
+        done
+        ask_cert_paths "$sn"
+        cp="$CERT_PATH"
+        kp="$KEY_PATH"
     fi
 
     mkdir -p /root/docker/wallos/{db,logos}
