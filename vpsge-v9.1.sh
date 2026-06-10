@@ -3349,6 +3349,121 @@ menu_manage_docker() {
     done
 }
 
+menu_manage_substore() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ 管理 Sub-Store ══${NC}"
+        echo ""
+        local status_str="${RED}○ 已停止 / 未安装${NC}"
+        if command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
+        fi
+        echo -e "  服务状态: $status_str"
+        echo ""
+        echo "  1) 启动 Sub-Store"
+        echo "  2) 停止 Sub-Store"
+        echo "  3) 重启 Sub-Store"
+        echo "  4) 查看实时日志"
+        echo "  5) 找回面板访问地址"
+        echo "  6) 卸载 Sub-Store"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
+        case $opt in
+            1) docker start substore 2>/dev/null && log_success "已启动" || log_error "操作失败/未安装"; press_enter ;;
+            2) docker stop substore 2>/dev/null && log_success "已停止" || log_error "操作失败/未安装"; press_enter ;;
+            3) docker restart substore 2>/dev/null && log_success "已重启" || log_error "操作失败/未安装"; press_enter ;;
+            4) docker logs -f substore 2>/dev/null || log_error "操作失败/未安装"; press_enter ;;
+            5)
+                if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+                    local p_sn=$(cat /root/docker/substore/domain.txt)
+                    local p_api=$(cat /root/docker/substore/api_path.txt)
+                    echo -e "  🌐 面板访问地址: ${GREEN}https://$p_sn:8443/?api=https://$p_sn:8443/$p_api${NC}"
+                else
+                    log_error "未找到配置信息，可能尚未安装。"
+                fi
+                press_enter
+                ;;
+            6)
+                echo -e "${YELLOW}警告：这将彻底删除 Sub-Store 及其所有数据！${NC}"
+                read -rp "确认卸载？(y/N): " choice
+                if [[ "${choice,,}" == "y" ]]; then
+                    docker stop substore 2>/dev/null || true
+                    docker rm substore 2>/dev/null || true
+                    rm -rf /root/docker/substore
+                    log_success "Sub-Store 已彻底卸载"
+                fi
+                press_enter
+                ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_manage_wallos() {
+    while true; do
+        clear
+        echo -e "${BOLD}${CYAN}══ 管理 Wallos ══${NC}"
+        echo ""
+        local status_str="${RED}○ 已停止 / 未安装${NC}"
+        if command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
+        fi
+        echo -e "  服务状态: $status_str"
+        echo ""
+        echo "  1) 启动 Wallos"
+        echo "  2) 停止 Wallos"
+        echo "  3) 重启 Wallos"
+        echo "  4) 查看实时日志"
+        echo "  5) 找回面板访问地址"
+        echo "  6) 卸载 Wallos"
+        echo ""
+        echo "  0) 返回上一级"
+        echo ""
+        read -rp "请选择 (默认 0): " opt
+        opt=${opt:-0}
+        case $opt in
+            1) docker start wallos 2>/dev/null && log_success "已启动" || log_error "操作失败/未安装"; press_enter ;;
+            2) docker stop wallos 2>/dev/null && log_success "已停止" || log_error "操作失败/未安装"; press_enter ;;
+            3) docker restart wallos 2>/dev/null && log_success "已重启" || log_error "操作失败/未安装"; press_enter ;;
+            4) docker logs -f wallos 2>/dev/null || log_error "操作失败/未安装"; press_enter ;;
+            5)
+                if [[ -f /root/docker/wallos/domain.txt ]]; then
+                    local w_sn=$(cat /root/docker/wallos/domain.txt)
+                    echo -e "  🌐 面板访问地址: ${GREEN}https://$w_sn:8443${NC}"
+                else
+                    log_error "未找到配置信息，可能尚未安装。"
+                fi
+                press_enter
+                ;;
+            6)
+                echo -e "${YELLOW}警告：这将彻底删除 Wallos 及其所有数据！${NC}"
+                read -rp "确认卸载？(y/N): " choice
+                if [[ "${choice,,}" == "y" ]]; then
+                    docker stop wallos 2>/dev/null || true
+                    docker rm wallos 2>/dev/null || true
+                    rm -rf /root/docker/wallos
+                    log_success "Wallos 已彻底卸载"
+                fi
+                press_enter
+                ;;
+            0) return ;;
+            *) log_warn "无效选项"; sleep 1 ;;
+        esac
+    done
+}
+
 menu_service() {
     while true; do
         clear
