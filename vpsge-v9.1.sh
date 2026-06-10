@@ -946,16 +946,38 @@ uninstall_docker() {
     echo -e "${YELLOW}警告：这将彻底删除 Docker 环境及其所有容器和镜像！${NC}"
     read -rp "确认卸载？(y/N): " choice
     if [[ "${choice,,}" == "y" ]]; then
-        systemctl stop docker 2>/dev/null || true
-        systemctl disable docker 2>/dev/null || true
+        log_step "1. 正在停止并删除所有正在运行的 Docker 容器..."
+        docker ps -aq | xargs docker stop 2>/dev/null || true
+        docker ps -aq | xargs docker rm 2>/dev/null || true
+
+        log_step "2. 正在全面停止 Docker、Socket 及 containerd 底层核心服务..."
+        systemctl stop docker docker.socket containerd containerd.service 2>/dev/null || true
+        systemctl disable docker docker.socket containerd containerd.service 2>/dev/null || true
+
+        log_step "3. 正在强制解除所有残留的内核虚拟挂载点 (overlay2/containerd)..."
+        # 【核心优化点】倒序找出所有与 docker/containerd 相关的内核挂载并强制延迟卸载(-fl)，彻底根治 blob not found
+        if [ -f /proc/mounts ]; then
+            cat /proc/mounts | grep -E '/var/lib/(docker|containerd)' | awk '{print $2}' | sort -r | while read -r mnt; do
+                umount -fl "$mnt" 2>/dev/null || true
+            done
+        fi
+
+        log_step "4. 正在卸载 Docker 相关核心软件包..."
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             apt purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
             apt autoremove -y 2>/dev/null || true
         else
             $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
         fi
-        rm -rf /var/lib/docker /var/lib/containerd
-        log_success "Docker 已彻底卸载"
+
+        log_step "5. 正在彻底清空物理残留目录、缓存、套接字与配置文件..."
+        rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker
+
+        log_step "6. 正在刷新重置 systemd 系统服务状态..."
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl reset-failed 2>/dev/null || true
+
+        log_success "Docker 环境已完美、干净地彻底卸载！无任何底层状态残留。"
     fi
 }
 
