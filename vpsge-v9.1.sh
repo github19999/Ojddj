@@ -151,12 +151,6 @@ ask() {
 
 prompt_reinstall() {
     local svc_name="$1"
-    
-    if [[ "$AUTO_DEFAULT" == "true" ]]; then
-        log_info "自动模式：检测到 ${svc_name} 已安装，将自动跳过重新部署以保护现有数据。"
-        return 1 # Skip
-    fi
-
     echo -e "\n  ${YELLOW}检测到 ${svc_name} 已经部署过了！${NC}"
     echo "  1) 不重新安装 (保留现有) [默认]"
     echo "  2) 重新安装 (覆盖更新)"
@@ -308,7 +302,7 @@ select_server_name() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  自动定位证书路径及兜底自签防崩溃
+#  自动定位证书路径
 # ────────────────────────────────────────────────────────────────
 ask_cert_paths() {
     local sn="$1"
@@ -331,20 +325,6 @@ ask_cert_paths() {
 
     ask_val CERT_PATH "cert_path（证书文件路径）" "$default_cert"
     ask_val KEY_PATH  "key_path（私钥文件路径）"  "$default_key"
-
-    # 【核心防御】若证书不存在，Nginx 必将崩溃，此处补全兜底生成自签证书
-    if [[ ! -f "$CERT_PATH" || ! -f "$KEY_PATH" ]]; then
-        log_warn "未检测到证书文件 ($CERT_PATH) 或私钥 ($KEY_PATH)！"
-        log_info "为了防止 Web 服务崩溃无法启动，系统将为您生成临时高强度自签证书兜底..."
-        mkdir -p "$(dirname "$CERT_PATH")" "$(dirname "$KEY_PATH")" 2>/dev/null || true
-        if openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout "$KEY_PATH" -out "$CERT_PATH" -subj "/CN=$sn" >/dev/null 2>&1; then
-            chmod 600 "$KEY_PATH" 2>/dev/null || true
-            chmod 644 "$CERT_PATH" 2>/dev/null || true
-            log_success "自签证书应急签发成功！面板后续访问可能会提示“不安全”，请在浏览器选择继续访问。"
-        else
-            log_error "兜底证书生成失败，Nginx 可能无法正常启动。"
-        fi
-    fi
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -947,7 +927,7 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  卸载功能合集 (【深度清理更新】确保无哈希与缓存遗留)
+#  卸载功能合集
 # ────────────────────────────────────────────────────────────────
 uninstall_singbox() {
     echo -e "${YELLOW}警告：这将彻底删除 sing-box 及其所有配置文件！${NC}"
@@ -957,10 +937,8 @@ uninstall_singbox() {
         systemctl disable sing-box 2>/dev/null || true
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload 2>/dev/null || true
-        
-        # 强制删除所有可能残留的实体二进制文件
-        rm -rf /usr/local/bin/sing-box /usr/bin/sing-box /bin/sing-box /sbin/sing-box
         rm -rf /etc/sing-box /var/log/sing-box /var/lib/sing-box
+        rm -f /usr/local/bin/sing-box /usr/bin/sing-box
         
         # 彻底清理包管理器安装的版本
         if [[ "$PKG_MANAGER" == "apt" ]]; then
@@ -969,7 +947,7 @@ uninstall_singbox() {
             $PKG_MANAGER remove -y sing-box 2>/dev/null || true
         fi
         
-        # 刷新 Bash 命令缓存，强制重置环境变量映射
+        # 刷新 Bash 命令缓存，防止卸载后依旧误报存在
         hash -r 2>/dev/null || true
         log_success "sing-box 已彻底卸载"
     fi
@@ -990,9 +968,7 @@ uninstall_nginx() {
             $PKG_MANAGER remove -y nginx 2>/dev/null || true
         fi
         
-        # 强制删除所有实体残留
-        rm -rf /etc/nginx /var/log/nginx /var/www/html
-        rm -f /usr/sbin/nginx /usr/bin/nginx /bin/nginx /usr/local/nginx/sbin/nginx /usr/local/bin/nginx
+        rm -rf /etc/nginx /var/log/nginx /var/www/html /usr/sbin/nginx /usr/bin/nginx
         
         # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
@@ -1013,6 +989,7 @@ uninstall_docker() {
         systemctl disable docker docker.socket containerd containerd.service 2>/dev/null || true
 
         log_step "3. 正在强制解除所有残留的内核虚拟挂载点 (overlay2/containerd)..."
+        # 【核心优化点】倒序找出所有与 docker/containerd 相关的内核挂载并强制延迟卸载(-fl)，彻底根治 blob not found
         if [ -f /proc/mounts ]; then
             cat /proc/mounts | grep -E '/var/lib/(docker|containerd)' | awk '{print $2}' | sort -r | while read -r mnt; do
                 umount -fl "$mnt" 2>/dev/null || true
@@ -1028,8 +1005,7 @@ uninstall_docker() {
         fi
 
         log_step "5. 正在彻底清空物理残留目录、缓存、套接字与配置文件..."
-        rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker
-        rm -f /usr/bin/docker /usr/libexec/docker /usr/bin/docker-compose /usr/local/bin/docker-compose
+        rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker /usr/bin/docker /usr/libexec/docker
         
         # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
@@ -1048,8 +1024,7 @@ uninstall_docker() {
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
-    # 【修复检查漏洞】实体判断防跳过
-    if command -v nginx &>/dev/null && [ -x "$(command -v nginx 2>/dev/null)" ]; then
+    if command -v nginx &>/dev/null; then
         local ver
         ver=$(nginx -v 2>&1 | head -1)
         log_info "当前已安装版本: $ver"
@@ -1085,7 +1060,7 @@ HTML
 install_docker_env() {
     local mode="${1:-1}"
     log_step "检查并配置 Docker 环境..."
-    if ! command -v docker >/dev/null 2>&1 || [ ! -x "$(command -v docker 2>/dev/null)" ]; then
+    if ! command -v docker >/dev/null 2>&1; then
         log_info "正在安装 Docker..."
         
         if [[ "$mode" == "3" ]]; then
@@ -1128,7 +1103,7 @@ install_substore() {
     local sub_ver_choice="${1:-1}"
     
     local is_installed=false
-    if [[ -d /root/docker/substore ]] && command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+    if [[ -d /root/docker/substore ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
         is_installed=true
     fi
 
@@ -1136,27 +1111,25 @@ install_substore() {
     local old_sub_api=""
     
     if [[ "$is_installed" == "true" ]]; then
-        if ! prompt_reinstall "Sub-Store 面板"; then
-            if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
-                local p_sn=$(cat /root/docker/substore/domain.txt)
-                local p_api=$(cat /root/docker/substore/api_path.txt)
-                echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$p_sn:8443/?api=https://$p_sn:8443/$p_api${NC}"
-            fi
-            return 0
+        log_warn "检测到您的服务器中 Sub-Store 已经部署过了！"
+        if [[ -f /root/docker/substore/domain.txt && -f /root/docker/substore/api_path.txt ]]; then
+            local p_sn=$(cat /root/docker/substore/domain.txt)
+            local p_api=$(cat /root/docker/substore/api_path.txt)
+            echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$p_sn:8443/?api=https://$p_sn:8443/$p_api${NC}"
         fi
+        
+        echo "  1) 不重新安装 (保留现有) [默认]"
+        echo "  2) 重新安装 (覆盖更新)"
+        echo "  3) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-3, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "1" ]]; then return 0; fi
         
         docker stop substore 2>/dev/null || true
         docker rm substore 2>/dev/null || true
         
-        # 为了防丢失重新收集链接
-        echo -e "\n  ${YELLOW}是否需要导入旧链接保留核心 API 路径？${NC}"
-        echo "  1) 否，重新生成全新的面板信息 [默认]"
-        echo "  2) 是，导入旧链接 (手动粘贴)"
-        local choice
-        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-        choice=${choice:-1}
-        
-        if [[ "$choice" == "2" ]]; then
+        if [[ "$choice" == "3" ]]; then
             read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
             if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
                 old_sub_domain="${BASH_REMATCH[1]}"
@@ -1167,28 +1140,26 @@ install_substore() {
             fi
         fi
     else
-        if [[ "$AUTO_DEFAULT" != "true" ]]; then
-            echo -e "\n${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            local choice
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-            if [[ "$choice" == "2" ]]; then
-                read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
-                if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
-                    old_sub_domain="${BASH_REMATCH[1]}"
-                    old_sub_api="${BASH_REMATCH[2]}"
-                    log_success "成功提取旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
-                else
-                    log_warn "未能识别链接格式，将使用常规方式配置。"
-                fi
+        echo -e "\n${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "2" ]]; then
+            read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
+            if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
+                old_sub_domain="${BASH_REMATCH[1]}"
+                old_sub_api="${BASH_REMATCH[2]}"
+                log_success "成功提取旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
+            else
+                log_warn "未能识别链接格式，将使用常规方式配置。"
             fi
         fi
     fi
 
     install_docker_env 1
-    if ! command -v nginx >/dev/null 2>&1 || [ ! -x "$(command -v nginx 2>/dev/null)" ]; then
+    if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
         install_nginx 1
     fi
@@ -1266,19 +1237,9 @@ install_substore() {
     echo "$sn" > domain.txt
 
     log_info "正在为您下载并部署选中版本的核心代码..."
-    curl -fsSL -L "$backend_url" -o sub-store.bundle.js || log_warn "后端包拉取遇到网络波动"
-    curl -fsSL -L "$frontend_url" -o dist.zip || log_warn "前端包拉取遇到网络波动"
+    curl -fsSL -L "$backend_url" -o sub-store.bundle.js
+    curl -fsSL -L "$frontend_url" -o dist.zip
     
-    # 【健壮性补强】检验文件是否真的下载成功，防止拉取空文件导致崩溃连环错
-    if [[ ! -s sub-store.bundle.js ]]; then
-        log_error "Sub-Store 后端核心包拉取失败，容器将无法启动！请检查您的服务器是否能正常访问 Github 资源库。"
-        return 1
-    fi
-    if [[ ! -s dist.zip ]] || [[ $(stat -c%s dist.zip 2>/dev/null || stat -f%z dist.zip 2>/dev/null) -lt 1000 ]]; then
-        log_error "Sub-Store 前端静态包拉取失败或体积异常！请检查您的网络。"
-        return 1
-    fi
-
     rm -rf frontend dist_tmp
     unzip -qo dist.zip -d dist_tmp || log_warn "前端解压出现异常，可能下载不完整"
     if [[ -d "dist_tmp/dist" ]]; then
@@ -1321,16 +1282,11 @@ services:
 EOF
 
     log_info "启动容器..."
-    if ! docker compose up -d; then
-        log_error "Sub-Store 容器拉起失败！请使用 'docker logs substore' 查看详细报错信息。"
-        return 1
-    fi
+    docker compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
-    
-    # 【核心防御】移除了引起语法报错的 HTTP2，去除可疑的 Upgrade Header 保障纯净 API HTTP 请求通过
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
     listen 8080;
@@ -1339,8 +1295,8 @@ server {
     return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1352,24 +1308,18 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 EOF
-    
-    # 强制校验 Nginx 逻辑防止因为证书原因整个 Web 服务崩盘
-    if nginx -t >/dev/null 2>&1; then
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-    else
-        log_error "Nginx 配置文件校验未通过，面板将无法访问！详细报错如下："
-        nginx -t
-        return 1
-    fi
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
     
     echo ""
     log_success "Sub-Store 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443/?api=https://$sn:8443/$api_path${NC}"
     echo -e "  🔐 后台API路径:  ${YELLOW}/$api_path${NC}"
-    echo -e "  ${PURPLE}【重要提示】请务必确认您的云服务商 (如 AWS/Oracle/腾讯云) 的外部防火墙放行了 8443 端口！${NC}"
     echo -e "  ${YELLOW}（如果不慎忘记该地址，可在脚本主菜单的「服务管理」中随时找回查看）${NC}"
     echo ""
 }
@@ -1379,26 +1329,43 @@ install_wallos() {
     local wallos_ver="2.36.2"
     
     local is_installed=false
-    if [[ -d /root/docker/wallos ]] && command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+    if [[ -d /root/docker/wallos ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
         is_installed=true
     fi
 
     local old_wal_domain=""
     if [[ "$is_installed" == "true" ]]; then
-        if ! prompt_reinstall "Wallos 面板"; then
-            if [[ -f /root/docker/wallos/domain.txt ]]; then
-                local w_sn=$(cat /root/docker/wallos/domain.txt)
-                echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$w_sn:8443${NC}"
-            fi
-            return 0
+        log_warn "检测到您的服务器中 Wallos 已经部署过了！"
+        if [[ -f /root/docker/wallos/domain.txt ]]; then
+            local w_sn=$(cat /root/docker/wallos/domain.txt)
+            echo -e "  🌐 为您找回的现有面板访问地址: ${GREEN}https://$w_sn:8443${NC}"
         fi
+        echo "  1) 不重新安装 (保留现有) [默认]"
+        echo "  2) 重新安装 (覆盖更新)"
+        echo "  3) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-3, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "1" ]]; then return 0; fi
         
         docker stop wallos 2>/dev/null || true
         docker rm wallos 2>/dev/null || true
         
-        echo -e "\n  ${YELLOW}是否需要导入旧链接以继承原本的域名绑定配置？${NC}"
-        echo "  1) 否，重新生成全新的面板信息 [默认]"
-        echo "  2) 是，导入旧链接 (手动粘贴)"
+        if [[ "$choice" == "3" ]]; then
+            read -rp "请粘贴旧的 Wallos 面板链接 (例如 https://wallos.xxx.com:8443): " old_wal_link
+            if [[ -n "$old_wal_link" ]]; then
+                if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
+                    old_wal_domain="${BASH_REMATCH[1]}"
+                    log_success "成功提取旧配置: 域名=$old_wal_domain"
+                else
+                    log_warn "未能识别链接格式，将使用常规方式配置。"
+                fi
+            fi
+        fi
+    else
+        echo -e "\n${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
         local choice
         read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
         choice=${choice:-1}
@@ -1413,26 +1380,6 @@ install_wallos() {
                 fi
             fi
         fi
-    else
-        if [[ "$AUTO_DEFAULT" != "true" ]]; then
-            echo -e "\n${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            local choice
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-            if [[ "$choice" == "2" ]]; then
-                read -rp "请粘贴旧的 Wallos 面板链接 (例如 https://wallos.xxx.com:8443): " old_wal_link
-                if [[ -n "$old_wal_link" ]]; then
-                    if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
-                        old_wal_domain="${BASH_REMATCH[1]}"
-                        log_success "成功提取旧配置: 域名=$old_wal_domain"
-                    else
-                        log_warn "未能识别链接格式，将使用常规方式配置。"
-                    fi
-                fi
-            fi
-        fi
     fi
 
     if [[ "$wallos_mode" == "1" ]]; then
@@ -1444,7 +1391,7 @@ install_wallos() {
     fi
 
     install_docker_env 1
-    if ! command -v nginx >/dev/null 2>&1 || [ ! -x "$(command -v nginx 2>/dev/null)" ]; then
+    if ! command -v nginx >/dev/null 2>&1; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
         install_nginx 1
     fi
@@ -1513,16 +1460,11 @@ services:
 EOF
 
     log_info "启动容器..."
-    if ! docker compose up -d; then
-        log_error "Wallos 容器拉起失败！请检查 Docker 状态或镜像拉取是否超时（国内环境高发）。"
-        return 1
-    fi
+    docker compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
-    
-    # 【核心防御】移除了引起语法报错的 HTTP2
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
 server {
     listen 8080;
@@ -1531,8 +1473,8 @@ server {
     return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen 8443 ssl;
-    listen [::]:8443 ssl;
+    listen 8443 ssl http2;
+    listen [::]:8443 ssl http2;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1547,19 +1489,11 @@ server {
     }
 }
 EOF
-    
-    if nginx -t >/dev/null 2>&1; then
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-    else
-        log_error "Nginx 配置文件校验未通过，面板将无法访问！详细报错如下："
-        nginx -t
-        return 1
-    fi
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
     
     echo ""
     log_success "Wallos 部署完成！"
     echo -e "  🌐 访问面板地址: ${GREEN}https://$sn:8443${NC}"
-    echo -e "  ${PURPLE}【重要提示】请务必确认您的云服务商 (如 AWS/Oracle/腾讯云) 的外部防火墙放行了 8443 端口！${NC}"
     echo ""
 }
 
@@ -1811,8 +1745,7 @@ menu_install_service() {
             case $vc in
                 0) return ;;
                 1|2|3)
-                    # 【核心修复】增加实体校验，无视任何命令缓存导致的幽灵存在错觉
-                    if command -v sing-box &>/dev/null && [ -x "$(command -v sing-box 2>/dev/null)" ]; then
+                    if command -v sing-box &>/dev/null; then
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_info "当前已安装版本: $ver"
@@ -2959,6 +2892,8 @@ for line in input_text.splitlines():
                 sni = host
             
             # 【修复】部分旧节点链接会将 IP 隐式当做 SNI 传过来。
+            # 如果不把 IP 剔除，复用时 sing-box 会给所有包含 tls 的协议 (如 VLESS/Trojan) 写死 IP SNI，
+            # 从而导致证书不匹配直接断流。这就是除了 SS (无 tls) 之外都不通的罪魁祸首。
             if sni and (re.match(r'^[\d\.]+$', str(sni)) or ":" in str(sni)):
                 sni = ""
             
