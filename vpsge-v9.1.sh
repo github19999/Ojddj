@@ -621,6 +621,15 @@ manage_web_services_ssl() {
 
 open_firewall_ports() {
     log_step "检查并自动放行本地防火墙端口 (80/443/8080/8443)..."
+    
+    # 增加 iptables 原生兜底机制，防止上层防火墙未启用但 iptables 生效导致阻断
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443 -j ACCEPT 2>/dev/null || true
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443 -j ACCEPT 2>/dev/null || true
+    fi
+    
     if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
         log_info "检测到 UFW 防火墙处于开启状态，正在放行端口..."
         ufw allow 80/tcp >/dev/null 2>&1 || true
@@ -938,7 +947,10 @@ uninstall_singbox() {
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload 2>/dev/null || true
         rm -rf /etc/sing-box /var/log/sing-box /var/lib/sing-box
-        rm -f /usr/local/bin/sing-box /usr/bin/sing-box
+        
+        # 彻底移除所有可能的 sing-box 二进制路径
+        rm -f /usr/local/bin/sing-box /usr/bin/sing-box /usr/sbin/sing-box /usr/local/sbin/sing-box
+        for bin in $(which -a sing-box 2>/dev/null); do rm -f "$bin"; done
         
         # 彻底清理包管理器安装的版本
         if [[ "$PKG_MANAGER" == "apt" ]]; then
@@ -968,7 +980,11 @@ uninstall_nginx() {
             $PKG_MANAGER remove -y nginx 2>/dev/null || true
         fi
         
-        rm -rf /etc/nginx /var/log/nginx /var/www/html /usr/sbin/nginx /usr/bin/nginx
+        rm -rf /etc/nginx /var/log/nginx /var/www/html
+        
+        # 彻底移除所有可能的 nginx 二进制路径
+        rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx /usr/local/bin/nginx
+        for bin in $(which -a nginx 2>/dev/null); do rm -f "$bin"; done
         
         # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
@@ -1024,7 +1040,8 @@ uninstall_docker() {
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
-    if command -v nginx &>/dev/null; then
+    hash -r 2>/dev/null || true
+    if command -v nginx >/dev/null 2>&1 && [ -f "$(command -v nginx)" ]; then
         local ver
         ver=$(nginx -v 2>&1 | head -1)
         log_info "当前已安装版本: $ver"
@@ -1060,7 +1077,8 @@ HTML
 install_docker_env() {
     local mode="${1:-1}"
     log_step "检查并配置 Docker 环境..."
-    if ! command -v docker >/dev/null 2>&1; then
+    hash -r 2>/dev/null || true
+    if ! command -v docker >/dev/null 2>&1 || ! [ -f "$(command -v docker)" ]; then
         log_info "正在安装 Docker..."
         
         if [[ "$mode" == "3" ]]; then
@@ -1287,6 +1305,8 @@ EOF
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
+    
+    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
     listen 8080;
@@ -1295,8 +1315,8 @@ server {
     return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen 8443 ssl http2;
-    listen [::]:8443 ssl http2;
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1465,6 +1485,8 @@ EOF
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
+    
+    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
 server {
     listen 8080;
@@ -1473,8 +1495,8 @@ server {
     return 301 https://\$host:8443\$request_uri;
 }
 server {
-    listen 8443 ssl http2;
-    listen [::]:8443 ssl http2;
+    listen 8443 ssl;
+    listen [::]:8443 ssl;
     server_name $sn;
 
     ssl_certificate $cp;
@@ -1745,7 +1767,9 @@ menu_install_service() {
             case $vc in
                 0) return ;;
                 1|2|3)
-                    if command -v sing-box &>/dev/null; then
+                    # 强刷缓存并精准判断文件以避免卸载后残留触发判定
+                    hash -r 2>/dev/null || true
+                    if command -v sing-box >/dev/null 2>&1 && [ -f "$(command -v sing-box)" ]; then
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_info "当前已安装版本: $ver"
@@ -2211,6 +2235,7 @@ HTML
     cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
     key_path="${key_path:-/etc/ssl/private/private.key}"
 
+    # 移除废弃参数 http2 确保能顺利运行在最新版 Nginx 1.27+ 上
     cat > /tmp/nginx.conf.template << 'EOF'
 user root;
 worker_processes auto;
@@ -2245,7 +2270,7 @@ http {
     }
 
     server {
-        listen                     127.0.0.1:8001 ssl http2;
+        listen                     127.0.0.1:8001 ssl;
 
         set_real_ip_from           127.0.0.1;
         real_ip_header             proxy_protocol;
