@@ -938,7 +938,17 @@ uninstall_singbox() {
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload 2>/dev/null || true
         rm -rf /etc/sing-box /var/log/sing-box /var/lib/sing-box
-        rm -f /usr/local/bin/sing-box
+        rm -f /usr/local/bin/sing-box /usr/bin/sing-box
+        
+        # 彻底清理包管理器安装的版本
+        if [[ "$PKG_MANAGER" == "apt" ]]; then
+            apt purge -y sing-box 2>/dev/null || true
+        elif [[ -n "$PKG_MANAGER" ]]; then
+            $PKG_MANAGER remove -y sing-box 2>/dev/null || true
+        fi
+        
+        # 刷新 Bash 命令缓存，防止卸载后依旧误报存在
+        hash -r 2>/dev/null || true
         log_success "sing-box 已彻底卸载"
     fi
 }
@@ -949,13 +959,19 @@ uninstall_nginx() {
     if [[ "${choice,,}" == "y" ]]; then
         systemctl stop nginx 2>/dev/null || true
         systemctl disable nginx 2>/dev/null || true
+        
+        # 彻底清理包管理器安装的版本
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             apt purge -y nginx nginx-common nginx-core 2>/dev/null || true
             apt autoremove -y 2>/dev/null || true
-        else
+        elif [[ -n "$PKG_MANAGER" ]]; then
             $PKG_MANAGER remove -y nginx 2>/dev/null || true
         fi
-        rm -rf /etc/nginx /var/log/nginx /var/www/html
+        
+        rm -rf /etc/nginx /var/log/nginx /var/www/html /usr/sbin/nginx /usr/bin/nginx
+        
+        # 刷新 Bash 命令缓存
+        hash -r 2>/dev/null || true
         log_success "Nginx 已彻底卸载"
     fi
 }
@@ -982,14 +998,17 @@ uninstall_docker() {
 
         log_step "4. 正在卸载 Docker 相关核心软件包..."
         if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+            apt purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-doc docker-compose podman-docker 2>/dev/null || true
             apt autoremove -y 2>/dev/null || true
-        else
-            $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
+        elif [[ -n "$PKG_MANAGER" ]]; then
+            $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
         fi
 
         log_step "5. 正在彻底清空物理残留目录、缓存、套接字与配置文件..."
-        rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker
+        rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker /usr/bin/docker /usr/libexec/docker
+        
+        # 刷新 Bash 命令缓存
+        hash -r 2>/dev/null || true
 
         log_step "6. 正在刷新重置 systemd 系统服务状态..."
         systemctl daemon-reload 2>/dev/null || true
@@ -1603,6 +1622,7 @@ uninstall_realm() {
     rm -f /etc/systemd/system/realm.service
     systemctl daemon-reload 2>/dev/null || true
     rm -rf /root/realm
+    hash -r 2>/dev/null || true
     log_success "realm 已被彻底卸载。"
     press_enter
 }
@@ -4104,5 +4124,6 @@ install_self() {
 #  入口
 # ────────────────────────────────────────────────────────────────
 check_root
+detect_distro
 install_self
 main_menu
