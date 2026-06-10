@@ -228,7 +228,13 @@ get_cert_domains() {
 select_server_name() {
     local default_sn="${1:-example.com}"
     local old_sni="$2"
-    local is_wallos="$3"
+    local target_idx="${3:-1}" # 默认选择的编号
+
+    # 兼容原本传递 "true" 的情况（原本 wallos 可能传的是 "true"）
+    if [[ "$target_idx" == "true" ]]; then
+        target_idx=2
+    fi
+
     echo ""
     echo -e "  ${CYAN}◆ 选择或输入域名 (server_name / SNI)${NC}"
 
@@ -238,8 +244,8 @@ select_server_name() {
     if [[ "$AUTO_DEFAULT" == "true" ]]; then
         if [[ -n "$old_sni" ]]; then
             SELECTED_SN="$old_sni"
-        elif [[ "$is_wallos" == "true" ]] && [[ ${#domains[@]} -gt 1 ]]; then
-            SELECTED_SN="${domains[1]}"
+        elif [[ ${#domains[@]} -ge "$target_idx" ]]; then
+            SELECTED_SN="${domains[$((target_idx-1))]}"
         elif [[ ${#domains[@]} -gt 0 ]]; then
             SELECTED_SN="${domains[0]}"
         else
@@ -263,9 +269,16 @@ select_server_name() {
         local manual_idx=$(( ${#domains[@]} + 1 ))
         echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入其他域名"
         echo ""
+        
+        # 如果指定的默认索引大于实际的域名数量，防错回退到 1
+        local actual_default_idx=$target_idx
+        if [[ "$actual_default_idx" -gt "${#domains[@]}" ]]; then
+            actual_default_idx=1
+        fi
+
         local sn_choice
-        read -rp "  > (编号，默认 1): " sn_choice
-        sn_choice=${sn_choice:-1}
+        read -rp "  > (编号，默认 ${actual_default_idx}): " sn_choice
+        sn_choice=${sn_choice:-$actual_default_idx}
 
         if [[ "$sn_choice" =~ ^[0-9]+$ ]] && [[ "$sn_choice" -ge 1 ]] && [[ "$sn_choice" -le "${#domains[@]}" ]]; then
             SELECTED_SN="${domains[$((sn_choice-1))]}"
@@ -1158,6 +1171,7 @@ install_substore() {
     local sn=""
     local cp=""
     local kp=""
+    
     # 强制跳过确认，自动应用旧域名和证书
     if [[ -n "$old_sub_domain" ]]; then
         sn="$old_sub_domain"
@@ -1168,8 +1182,13 @@ install_substore() {
         kp="$KEY_PATH"
         AUTO_DEFAULT="$prev_auto"
     else
-        select_server_name "sub.example.com" ""
+        # 强制在选择域名时弹出版单给出选择（Sub-Store 默认选项 1）
+        local prev_auto="$AUTO_DEFAULT"
+        AUTO_DEFAULT="false" 
+        select_server_name "sub.example.com" "" "1"
         sn="$SELECTED_SN"
+        AUTO_DEFAULT="$prev_auto"
+        
         ask_cert_paths "$sn"
         cp="$CERT_PATH"
         kp="$KEY_PATH"
@@ -1368,15 +1387,19 @@ install_wallos() {
         AUTO_DEFAULT="$prev_auto"
     else
         while true; do
-            select_server_name "wallos.example.com" "" "true"
+            # 强制在选择域名时弹出版单给出选择（Wallos 默认选项 2）
+            local prev_auto="$AUTO_DEFAULT"
+            AUTO_DEFAULT="false" 
+            select_server_name "wallos.example.com" "" "2"
             sn="$SELECTED_SN"
+            AUTO_DEFAULT="$prev_auto"
+            
             if [[ -f /root/docker/substore/domain.txt ]]; then
                 local sub_sn=$(cat /root/docker/substore/domain.txt)
                 if [[ "$sn" == "$sub_sn" ]]; then
                     echo -e "${RED}[ERROR] 域名冲突拦截！检测到该域名已被 Sub-Store 占用。${NC}"
                     echo -e "${CYAN}请重新选择，或者选择 手动输入 其他域名！${NC}"
                     echo ""
-                    [[ "$AUTO_DEFAULT" == "true" ]] && AUTO_DEFAULT=false
                     continue
                 fi
             fi
