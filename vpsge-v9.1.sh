@@ -3103,10 +3103,10 @@ update_script() {
     # --------------------------------------------------------------------------------------------------
     # 【更新配置区】请在这里填写您存放在 GitHub 上的原始 vpsge-v9.sh 的 Raw 直链！
     # --------------------------------------------------------------------------------------------------
-    local vpsge_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.sh"
+    local vpsge_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"
     # --------------------------------------------------------------------------------------------------
 
-    if [[ -z "$vpsge_REMOTE_URL" || "$vpsge_REMOTE_URL" == *"请在这里填入你的真实脚本"* ]]; then
+    if [[ -z "$vpsge_REMOTE_URL" || "$vpsge_REMOTE_URL" == *"https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"* ]]; then
         log_error "更新失败：未配置真实的脚本直链 (vpsge_REMOTE_URL)。请在脚本源码中修改该变量。"
         press_enter
         return
