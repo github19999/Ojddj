@@ -44,6 +44,19 @@ log_success() { echo -e "${GREEN}[✓]${NC} $*"; }
 press_enter() { echo ""; read -rp "$(echo -e "${CYAN}按 Enter 返回...${NC}")"; }
 
 # ────────────────────────────────────────────────────────────────
+#  强力全局命令探测 (无视 $PATH 缺失和 Hash 缓存异常)
+# ────────────────────────────────────────────────────────────────
+is_cmd_exist() {
+    local cmd="$1"
+    hash -r 2>/dev/null || true
+    if command -v "$cmd" >/dev/null 2>&1; then return 0; fi
+    for p in /usr/local/bin /usr/bin /usr/sbin /bin /sbin; do
+        if [[ -x "$p/$cmd" ]]; then return 0; fi
+    done
+    return 1
+}
+
+# ────────────────────────────────────────────────────────────────
 #  Root 检查
 # ────────────────────────────────────────────────────────────────
 check_root() {
@@ -71,7 +84,7 @@ detect_distro() {
         ubuntu|debian|raspbian) PKG_MANAGER="apt" ;;
         centos|rhel|almalinux|rocky|fedora)
             PKG_MANAGER="yum"
-            command -v dnf &>/dev/null && PKG_MANAGER="dnf"
+            is_cmd_exist dnf && PKG_MANAGER="dnf"
             ;;
         *) log_warn "未经测试的发行版: $DISTRO_ID，尝试使用 apt"; PKG_MANAGER="apt" ;;
     esac
@@ -332,12 +345,12 @@ ask_cert_paths() {
 # ────────────────────────────────────────────────────────────────
 bootstrap_packages() {
     log_step "预装基础组件"
-    if command -v apt &>/dev/null; then
+    if is_cmd_exist apt; then
         apt update -y && apt install -y curl sudo wget git unzip nano vim openssl python3
-    elif command -v dnf &>/dev/null; then
+    elif is_cmd_exist dnf; then
         dnf install -y epel-release 2>/dev/null || true
         dnf install -y curl sudo wget git unzip nano vim openssl python3
-    elif command -v yum &>/dev/null; then
+    elif is_cmd_exist yum; then
         yum install -y epel-release 2>/dev/null || true
         yum install -y curl sudo wget git unzip nano vim openssl python3
     fi
@@ -371,7 +384,7 @@ setup_ssh_key() {
     chmod 600 /root/.ssh/authorized_keys
     chown root:root /root/.ssh/authorized_keys
 
-    command -v restorecon &>/dev/null && { restorecon -Rv /root/.ssh/ >/dev/null 2>&1 && log_info "SELinux 上下文已修复"; } || true
+    is_cmd_exist restorecon && { restorecon -Rv /root/.ssh/ >/dev/null 2>&1 && log_info "SELinux 上下文已修复"; } || true
     log_success "SSH 密钥登录配置完成"
 }
 
@@ -622,15 +635,17 @@ manage_web_services_ssl() {
 open_firewall_ports() {
     log_step "检查并自动放行本地防火墙端口 (80/443/8080/8443)..."
     
-    # 增加 iptables 原生兜底机制，防止上层防火墙未启用但 iptables 生效导致阻断
-    if command -v iptables >/dev/null 2>&1; then
-        iptables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443 -j ACCEPT 2>/dev/null || true
+    # 增加 iptables 原生兜底机制，无视上层拦截
+    if is_cmd_exist iptables; then
+        iptables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443,3001,8282 -j ACCEPT 2>/dev/null || true
+        is_cmd_exist iptables-save && iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
     fi
-    if command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443 -j ACCEPT 2>/dev/null || true
+    if is_cmd_exist ip6tables; then
+        ip6tables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443,3001,8282 -j ACCEPT 2>/dev/null || true
+        is_cmd_exist ip6tables-save && ip6tables-save >/etc/iptables/rules.v6 2>/dev/null || true
     fi
     
-    if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    if is_cmd_exist ufw && ufw status | grep -q "Status: active"; then
         log_info "检测到 UFW 防火墙处于开启状态，正在放行端口..."
         ufw allow 80/tcp >/dev/null 2>&1 || true
         ufw allow 443/tcp >/dev/null 2>&1 || true
@@ -640,7 +655,7 @@ open_firewall_ports() {
         log_success "UFW 防火墙放行成功"
     fi
 
-    if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
+    if is_cmd_exist firewall-cmd && systemctl is-active --quiet firewalld; then
         log_info "检测到 Firewalld 防火墙处于开启状态，正在放行端口..."
         firewall-cmd --zone=public --add-port=80/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1 || true
@@ -957,7 +972,7 @@ uninstall_singbox() {
         
         # 彻底移除所有可能的 sing-box 二进制路径
         rm -f /usr/local/bin/sing-box /usr/bin/sing-box /usr/sbin/sing-box /usr/local/sbin/sing-box /bin/sing-box
-        for bin in $(type -aP sing-box 2>/dev/null); do rm -f "$bin"; done
+        for bin in $(type -aP sing-box 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
         
         # 刷新 Bash 命令缓存，防止卸载后依旧误报存在
         hash -r 2>/dev/null || true
@@ -984,7 +999,7 @@ uninstall_nginx() {
         
         # 彻底移除所有可能的 nginx 二进制路径
         rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx /usr/local/bin/nginx /bin/nginx
-        for bin in $(type -aP nginx 2>/dev/null); do rm -f "$bin"; done
+        for bin in $(type -aP nginx 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
         
         # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
@@ -997,15 +1012,15 @@ uninstall_docker() {
     read -rp "确认卸载？(y/N): " choice
     if [[ "${choice,,}" == "y" ]]; then
         log_step "1. 正在停止并删除所有正在运行的 Docker 容器..."
-        docker ps -aq | xargs docker stop 2>/dev/null || true
-        docker ps -aq | xargs docker rm 2>/dev/null || true
+        docker ps -aq 2>/dev/null | xargs -r docker stop 2>/dev/null || true
+        docker ps -aq 2>/dev/null | xargs -r docker rm 2>/dev/null || true
 
         log_step "2. 正在全面停止 Docker、Socket 及 containerd 底层核心服务..."
         systemctl stop docker docker.socket containerd containerd.service 2>/dev/null || true
         systemctl disable docker docker.socket containerd containerd.service 2>/dev/null || true
 
         log_step "3. 正在强制解除所有残留的内核虚拟挂载点 (overlay2/containerd)..."
-        # 【核心优化点】倒序找出所有与 docker/containerd 相关的内核挂载并强制延迟卸载(-fl)，彻底根治 blob not found
+        # 【核心优化点】倒序找出所有与 docker/containerd 相关的内核挂载并强制延迟卸载(-fl)
         if [ -f /proc/mounts ]; then
             cat /proc/mounts | grep -E '/var/lib/(docker|containerd)' | awk '{print $2}' | sort -r | while read -r mnt; do
                 umount -fl "$mnt" 2>/dev/null || true
@@ -1024,7 +1039,7 @@ uninstall_docker() {
         rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker /usr/bin/docker /usr/libexec/docker
         
         # 彻底移除可能残留的二进制文件
-        for bin in $(type -aP docker 2>/dev/null); do rm -f "$bin"; done
+        for bin in $(type -aP docker 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
         
         # 刷新 Bash 命令缓存
         hash -r 2>/dev/null || true
@@ -1043,10 +1058,8 @@ uninstall_docker() {
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
-    hash -r 2>/dev/null || true
-    local nginx_path
-    nginx_path=$(type -P nginx 2>/dev/null || true)
-    if [[ -n "$nginx_path" && -x "$nginx_path" ]]; then
+    
+    if is_cmd_exist nginx; then
         local ver
         ver=$(nginx -v 2>&1 | head -1)
         log_info "当前已安装版本: $ver"
@@ -1067,6 +1080,11 @@ install_nginx() {
         $PKG_MANAGER install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     fi
     
+    # 针对 SELinux 系统，开启网络连接转发权限以支持面板反代
+    if is_cmd_exist setsebool; then
+        setsebool -P httpd_can_network_connect 1 2>/dev/null || true
+    fi
+
     mkdir -p /var/www/html /etc/nginx/conf.d
     if [[ ! -f /var/www/html/index.html ]]; then
         cat > /var/www/html/index.html << 'HTML'
@@ -1082,10 +1100,8 @@ HTML
 install_docker_env() {
     local mode="${1:-1}"
     log_step "检查并配置 Docker 环境..."
-    hash -r 2>/dev/null || true
-    local docker_path
-    docker_path=$(type -P docker 2>/dev/null || true)
-    if [[ -z "$docker_path" || ! -x "$docker_path" ]]; then
+    
+    if ! is_cmd_exist docker; then
         log_info "正在安装 Docker..."
         
         if [[ "$mode" == "3" ]]; then
@@ -1185,15 +1201,12 @@ install_substore() {
 
     install_docker_env 1
     
-    hash -r 2>/dev/null || true
-    local nginx_path
-    nginx_path=$(type -P nginx 2>/dev/null || true)
-    if [[ -z "$nginx_path" || ! -x "$nginx_path" ]]; then
+    if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
         install_nginx 1
     fi
 
-    if ! [[ -x "$(type -P unzip 2>/dev/null)" ]]; then
+    if ! is_cmd_exist unzip; then
         log_info "正在为您自动安装必要的 unzip 解压工具..."
         if [[ "$PKG_MANAGER" == "apt" ]]; then
             apt update -y >/dev/null 2>&1 || true
@@ -1245,6 +1258,12 @@ install_substore() {
         ask_cert_paths "$sn"
         cp="$CERT_PATH"
         kp="$KEY_PATH"
+    fi
+    
+    if [[ ! -f "$cp" || ! -f "$kp" ]]; then
+        log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
+        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
+        log_warn "请后续确保将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/substore/data
@@ -1311,7 +1330,7 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose up -d
+    docker compose up -d 2>/dev/null || docker-compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -1423,10 +1442,7 @@ install_wallos() {
 
     install_docker_env 1
     
-    hash -r 2>/dev/null || true
-    local nginx_path
-    nginx_path=$(type -P nginx 2>/dev/null || true)
-    if [[ -z "$nginx_path" || ! -x "$nginx_path" ]]; then
+    if ! is_cmd_exist nginx; then
         log_warn "未检测到 Nginx，正在尝试自动预装..."
         install_nginx 1
     fi
@@ -1468,6 +1484,12 @@ install_wallos() {
         cp="$CERT_PATH"
         kp="$KEY_PATH"
     fi
+    
+    if [[ ! -f "$cp" || ! -f "$kp" ]]; then
+        log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
+        log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
+        log_warn "请后续确保将正确的证书文件放置于: $cp"
+    fi
 
     mkdir -p /root/docker/wallos/{db,logos}
     cd /root/docker/wallos
@@ -1495,7 +1517,7 @@ services:
 EOF
 
     log_info "启动容器..."
-    docker compose up -d
+    docker compose up -d 2>/dev/null || docker-compose up -d
 
     log_step "配置 Nginx 安全反向代理 (专属隔离 8443 端口)"
     open_firewall_ports
@@ -1669,19 +1691,21 @@ menu_manage_realm() {
         clear
         echo -e "${BOLD}${CYAN}══ 管理 Realm (端口转发) ══${NC}"
         echo ""
-        local realm_install="未安装"
-        local realm_color="${RED}"
-        if [ -f "/root/realm/realm" ]; then
-            realm_install="已安装"
-            realm_color="${GREEN}"
+        
+        local is_installed=false
+        if [[ -f "/root/realm/realm" ]]; then
+            is_installed=true
         fi
 
-        local status_str="${RED}○ 未启用${NC}"
-        if systemctl is-active --quiet realm 2>/dev/null; then
-            status_str="${GREEN}● 启用${NC}"
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
+            if systemctl is-active --quiet realm 2>/dev/null; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
         fi
 
-        echo -e "  环境状态: ${realm_color}${realm_install}${NC}"
         echo -e "  服务状态: $status_str"
         echo ""
         echo "  1) 部署环境 (安装 Realm)"
@@ -1699,8 +1723,12 @@ menu_manage_realm() {
             1) deploy_realm; press_enter ;;
             2) add_forward_realm; press_enter ;;
             3) delete_forward_realm; press_enter ;;
-            4) start_service_realm; press_enter ;;
-            5) stop_service_realm; press_enter ;;
+            4) 
+                if [[ "$is_installed" == "true" ]]; then start_service_realm; else log_error "未安装 Realm"; fi
+                press_enter ;;
+            5) 
+                if [[ "$is_installed" == "true" ]]; then stop_service_realm; else log_error "未安装 Realm"; fi
+                press_enter ;;
             6) uninstall_realm ;;
             0) return ;;
             *) log_warn "无效选项"; sleep 1 ;;
@@ -1782,11 +1810,7 @@ menu_install_service() {
             case $vc in
                 0) return ;;
                 1|2|3)
-                    # 强刷缓存并精准判断文件以避免卸载后残留触发判定
-                    hash -r 2>/dev/null || true
-                    local sb_path
-                    sb_path=$(type -P sing-box 2>/dev/null || true)
-                    if [[ -n "$sb_path" && -x "$sb_path" ]]; then
+                    if is_cmd_exist sing-box; then
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_info "当前已安装版本: $ver"
@@ -1862,10 +1886,7 @@ EOF
                         systemctl daemon-reload
                     fi
 
-                    hash -r 2>/dev/null || true
-                    local final_sb_path
-                    final_sb_path=$(type -P sing-box 2>/dev/null || true)
-                    if [[ -n "$final_sb_path" && -x "$final_sb_path" ]]; then
+                    if is_cmd_exist sing-box; then
                         local ver
                         ver=$(sing-box version 2>/dev/null | head -1)
                         log_success "sing-box 安装成功: $ver"
@@ -2228,10 +2249,7 @@ setup_nginx_reality() {
     local domain="$1"
     log_step "配置 Nginx REALITY 回落（域名: ${domain}）..."
 
-    hash -r 2>/dev/null || true
-    local nginx_path
-    nginx_path=$(type -P nginx 2>/dev/null || true)
-    if [[ -z "$nginx_path" || ! -x "$nginx_path" ]]; then
+    if ! is_cmd_exist nginx; then
         log_warn "Nginx 未安装，跳过自动配置（可在「三、安装服务」中安装 Nginx 后重新配置）"
         return
     fi
@@ -2755,11 +2773,11 @@ EOF
 }
 
 configure_singbox() {
-    if ! command -v python3 &>/dev/null; then
+    if ! is_cmd_exist python3; then
         log_info "正在预装 python3 以支持节点解析..."
-        if command -v apt &>/dev/null; then apt install -y python3 >/dev/null 2>&1;
-        elif command -v dnf &>/dev/null; then dnf install -y python3 >/dev/null 2>&1;
-        elif command -v yum &>/dev/null; then yum install -y python3 >/dev/null 2>&1; fi
+        if is_cmd_exist apt; then apt install -y python3 >/dev/null 2>&1;
+        elif is_cmd_exist dnf; then dnf install -y python3 >/dev/null 2>&1;
+        elif is_cmd_exist yum; then yum install -y python3 >/dev/null 2>&1; fi
     fi
     
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
@@ -3184,7 +3202,7 @@ EOF
         log_success "配置文件已写入: /etc/sing-box/config.json"
         echo ""
 
-        if [[ -x "$(type -P sing-box 2>/dev/null)" ]]; then
+        if is_cmd_exist sing-box; then
             local _check_out
             _check_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1)
             local _check_rc=$?
@@ -3241,10 +3259,21 @@ menu_manage_singbox() {
         clear
         echo -e "${BOLD}${CYAN}══ 管理 sing-box ══${NC}"
         echo ""
-        local status_str="${RED}○ 已停止 / 未配置${NC}"
-        if systemctl is-active --quiet sing-box 2>/dev/null; then
-            status_str="${GREEN}● 运行中${NC}"
+        
+        local is_installed=false
+        if is_cmd_exist sing-box || systemctl cat sing-box.service >/dev/null 2>&1; then
+            is_installed=true
         fi
+
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
+            if systemctl is-active --quiet sing-box 2>/dev/null; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
+        fi
+
         echo -e "  服务状态: $status_str"
         echo ""
         echo "  1) 启动 sing-box"
@@ -3265,39 +3294,39 @@ menu_manage_singbox() {
         opt=${opt:-0}
         case $opt in
             1) 
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl start sing-box && log_success "sing-box 已启动"
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             2) 
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl stop sing-box && log_success "sing-box 已停止"
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             3)
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl restart sing-box
                     echo ""
                     systemctl status sing-box --no-pager || true
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             4) 
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl status sing-box --no-pager || true
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             5) 
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl enable sing-box && log_success "已设为开机自启"
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             6) 
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl disable sing-box && log_success "已取消开机自启"
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             7)
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     if systemctl is-enabled --quiet sing-box 2>/dev/null; then
                         log_success "sing-box 已设为开机自启"
                     else
@@ -3306,13 +3335,12 @@ menu_manage_singbox() {
                 else log_error "未安装 sing-box"; fi
                 press_enter ;;
             8) 
-                if systemctl list-unit-files | grep -q "^sing-box.service" 2>/dev/null || [[ -f /etc/systemd/system/sing-box.service ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     journalctl -u sing-box -f --no-pager
                 else log_error "未安装 sing-box"; press_enter; fi
                 ;;
             9)
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P sing-box 2>/dev/null)" ]]; then
+                if is_cmd_exist sing-box; then
                     local _sc_out
                     _sc_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1)
                     local _sc_rc=$?
@@ -3345,10 +3373,21 @@ menu_manage_nginx() {
         clear
         echo -e "${BOLD}${CYAN}══ 管理 Nginx ══${NC}"
         echo ""
-        local status_str="${RED}○ 已停止 / 未安装${NC}"
-        if systemctl is-active --quiet nginx 2>/dev/null; then
-            status_str="${GREEN}● 运行中${NC}"
+        
+        local is_installed=false
+        if is_cmd_exist nginx || systemctl cat nginx.service >/dev/null 2>&1; then
+            is_installed=true
         fi
+
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
+            if systemctl is-active --quiet nginx 2>/dev/null; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
+        fi
+
         echo -e "  服务状态: $status_str"
         echo ""
         echo "  1) 启动 Nginx"
@@ -3365,20 +3404,17 @@ menu_manage_nginx() {
         opt=${opt:-0}
         case $opt in
             1) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P nginx 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl start nginx && log_success "Nginx 已启动"
                 else log_error "Nginx 未安装"; fi
                 press_enter ;;
             2) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P nginx 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl stop nginx && log_success "Nginx 已停止"
                 else log_error "Nginx 未安装"; fi
                 press_enter ;;
             3)
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P nginx 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl restart nginx
                     echo ""
                     systemctl status nginx --no-pager || true
@@ -3387,16 +3423,14 @@ menu_manage_nginx() {
                 fi
                 press_enter ;;
             4)
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P nginx 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     nginx -t && log_success "Nginx 配置验证通过" || log_error "Nginx 配置有误"
                 else
                     log_error "Nginx 未安装"
                 fi
                 press_enter ;;
             5) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P nginx 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl enable nginx && log_success "Nginx 已设为开机自启"
                 else log_error "Nginx 未安装"; fi
                 press_enter ;;
@@ -3417,10 +3451,21 @@ menu_manage_docker() {
         clear
         echo -e "${BOLD}${CYAN}══ 管理 Docker 环境 ══${NC}"
         echo ""
-        local status_str="${RED}○ 已停止 / 未安装${NC}"
-        if systemctl is-active --quiet docker 2>/dev/null; then
-            status_str="${GREEN}● 运行中${NC}"
+        
+        local is_installed=false
+        if is_cmd_exist docker || systemctl cat docker.service >/dev/null 2>&1; then
+            is_installed=true
         fi
+
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
+            if systemctl is-active --quiet docker 2>/dev/null; then
+                status_str="${GREEN}● 运行中${NC}"
+            else
+                status_str="${YELLOW}○ 已停止${NC}"
+            fi
+        fi
+
         echo -e "  服务状态: $status_str"
         echo ""
         echo "  1) 启动 Docker"
@@ -3435,26 +3480,22 @@ menu_manage_docker() {
         opt=${opt:-0}
         case $opt in
             1) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P docker 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl start docker && log_success "Docker 已启动"
                 else log_error "Docker 未安装"; fi
                 press_enter ;;
             2) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P docker 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl stop docker && log_success "Docker 已停止"
                 else log_error "Docker 未安装"; fi
                 press_enter ;;
             3) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P docker 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl restart docker && log_success "Docker 已重启"
                 else log_error "Docker 未安装"; fi
                 press_enter ;;
             4) 
-                hash -r 2>/dev/null || true
-                if [[ -x "$(type -P docker 2>/dev/null)" ]]; then
+                if [[ "$is_installed" == "true" ]]; then
                     systemctl status docker --no-pager || true
                 else log_error "Docker 未安装"; fi
                 press_enter ;;
@@ -3470,15 +3511,21 @@ menu_manage_substore() {
         clear
         echo -e "${BOLD}${CYAN}══ 管理 Sub-Store ══${NC}"
         echo ""
-        local status_str="${RED}○ 已停止 / 未安装${NC}"
-        hash -r 2>/dev/null || true
-        if [[ -x "$(type -P docker 2>/dev/null)" ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+        
+        local is_installed=false
+        if is_cmd_exist docker && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
+            is_installed=true
+        fi
+
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
             if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^substore$"; then
                 status_str="${GREEN}● 运行中${NC}"
             else
                 status_str="${YELLOW}○ 已停止${NC}"
             fi
         fi
+
         echo -e "  服务状态: $status_str"
         echo ""
         echo "  1) 启动 Sub-Store"
@@ -3529,15 +3576,21 @@ menu_manage_wallos() {
         clear
         echo -e "${BOLD}${CYAN}══ 管理 Wallos ══${NC}"
         echo ""
-        local status_str="${RED}○ 已停止 / 未安装${NC}"
-        hash -r 2>/dev/null || true
-        if [[ -x "$(type -P docker 2>/dev/null)" ]] && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+        
+        local is_installed=false
+        if is_cmd_exist docker && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
+            is_installed=true
+        fi
+
+        local status_str="${RED}○ 未安装${NC}"
+        if [[ "$is_installed" == "true" ]]; then
             if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^wallos$"; then
                 status_str="${GREEN}● 运行中${NC}"
             else
                 status_str="${YELLOW}○ 已停止${NC}"
             fi
         fi
+
         echo -e "  服务状态: $status_str"
         echo ""
         echo "  1) 启动 Wallos"
@@ -3663,8 +3716,7 @@ INNEREOF
 
     echo ""
     log_step "修复后验证..."
-    hash -r 2>/dev/null || true
-    if [[ -x "$(type -P sing-box 2>/dev/null)" ]]; then
+    if is_cmd_exist sing-box; then
         local _out _rc
         _out=$(sing-box check -c "$cfg" 2>&1)
         _rc=$?
@@ -3701,7 +3753,7 @@ generate_links() {
         return 1
     fi
 
-    if ! [[ -x "$(type -P python3 2>/dev/null)" ]]; then
+    if ! is_cmd_exist python3; then
         log_error "需要 python3，请先安装"; return 1
     fi
 
@@ -4175,8 +4227,7 @@ install_self() {
     fi
 
     # 验证是否安装成功并刷新 hash
-    hash -r 2>/dev/null || true
-    if [[ -x "$(type -P vpsge 2>/dev/null)" ]]; then
+    if is_cmd_exist vpsge; then
         log_success "已安装快捷命令: vpsge"
     fi
 }
