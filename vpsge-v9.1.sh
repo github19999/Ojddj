@@ -995,7 +995,7 @@ uninstall_nginx() {
             $PKG_MANAGER remove -y nginx 2>/dev/null || true
         fi
         
-        rm -rf /etc/nginx /var/log/nginx /var/www/html
+        rm -rf /etc/nginx /var/log/nginx /var/www/html /usr/sbin/nginx /usr/bin/nginx
         
         # 彻底移除所有可能的 nginx 二进制路径
         rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx /usr/local/bin/nginx /bin/nginx
@@ -1020,7 +1020,6 @@ uninstall_docker() {
         systemctl disable docker docker.socket containerd containerd.service 2>/dev/null || true
 
         log_step "3. 正在强制解除所有残留的内核虚拟挂载点 (overlay2/containerd)..."
-        # 【核心优化点】倒序找出所有与 docker/containerd 相关的内核挂载并强制延迟卸载(-fl)
         if [ -f /proc/mounts ]; then
             cat /proc/mounts | grep -E '/var/lib/(docker|containerd)' | awk '{print $2}' | sort -r | while read -r mnt; do
                 umount -fl "$mnt" 2>/dev/null || true
@@ -1075,7 +1074,8 @@ install_nginx() {
 
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt update -y >/dev/null 2>&1 || true
-        apt install -y nginx || { log_error "Nginx 安装失败"; return 1; }
+        # 核心防瘫痪修复：使用 --force-confmiss 强制恢复任何缺失的默认配置文件 (如被误删的 nginx.conf)
+        DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confmiss" install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     else
         $PKG_MANAGER install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     fi
@@ -2276,7 +2276,6 @@ HTML
     cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
     key_path="${key_path:-/etc/ssl/private/private.key}"
 
-    # 移除废弃参数 http2 确保能顺利运行在最新版 Nginx 1.27+ 上
     cat > /tmp/nginx.conf.template << 'EOF'
 user root;
 worker_processes auto;
