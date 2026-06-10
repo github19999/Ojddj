@@ -993,7 +993,8 @@ install_nginx() {
 <body><h1>It works!</h1></body></html>
 HTML
     fi
-    systemctl enable nginx && systemctl start nginx
+    systemctl enable nginx >/dev/null 2>&1 || true
+    systemctl start nginx >/dev/null 2>&1 || true
     systemctl is-active --quiet nginx && log_success "Nginx 安装并启动成功" || log_warn "Nginx 启动失败"
 }
 
@@ -1027,8 +1028,8 @@ install_docker_env() {
             return 0
         fi
     fi
-    systemctl enable docker >/dev/null 2>&1
-    systemctl start docker >/dev/null 2>&1
+    systemctl enable docker >/dev/null 2>&1 || true
+    systemctl start docker >/dev/null 2>&1 || true
 
     if ! docker compose version >/dev/null 2>&1; then
         log_info "正在安装 Docker Compose 插件..."
@@ -1080,22 +1081,20 @@ install_substore() {
             fi
         fi
     else
-        if [[ "$AUTO_DEFAULT" != "true" ]]; then
-            echo -e "\n${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            local choice
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-            if [[ "$choice" == "2" ]]; then
-                read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
-                if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
-                    old_sub_domain="${BASH_REMATCH[1]}"
-                    old_sub_api="${BASH_REMATCH[2]}"
-                    log_success "成功提取旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
-                else
-                    log_warn "未能识别链接格式，将使用常规方式配置。"
-                fi
+        echo -e "\n${CYAN}检测到 Sub-Store 未安装，请选择部署方式：${NC}"
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "2" ]]; then
+            read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
+            if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
+                old_sub_domain="${BASH_REMATCH[1]}"
+                old_sub_api="${BASH_REMATCH[2]}"
+                log_success "成功提取旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
+            else
+                log_warn "未能识别链接格式，将使用常规方式配置。"
             fi
         fi
     fi
@@ -1177,7 +1176,7 @@ install_substore() {
     curl -fsSL -L "$frontend_url" -o dist.zip
     
     rm -rf frontend dist_tmp
-    unzip -qo dist.zip -d dist_tmp
+    unzip -qo dist.zip -d dist_tmp || log_warn "前端解压出现异常，可能下载不完整"
     if [[ -d "dist_tmp/dist" ]]; then
         mv dist_tmp/dist frontend
     else
@@ -1250,7 +1249,7 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
     
     echo ""
     log_success "Sub-Store 部署完成！"
@@ -1299,22 +1298,20 @@ install_wallos() {
             fi
         fi
     else
-        if [[ "$AUTO_DEFAULT" != "true" ]]; then
-            echo -e "\n${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
-            echo "  1) 直接安装 [默认]"
-            echo "  2) 导入旧链接 (手动粘贴)"
-            local choice
-            read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
-            choice=${choice:-1}
-            if [[ "$choice" == "2" ]]; then
-                read -rp "请粘贴旧的 Wallos 面板链接 (例如 https://wallos.xxx.com:8443): " old_wal_link
-                if [[ -n "$old_wal_link" ]]; then
-                    if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
-                        old_wal_domain="${BASH_REMATCH[1]}"
-                        log_success "成功提取旧配置: 域名=$old_wal_domain"
-                    else
-                        log_warn "未能识别链接格式，将使用常规方式配置。"
-                    fi
+        echo -e "\n${CYAN}检测到 Wallos 未安装，请选择部署方式：${NC}"
+        echo "  1) 直接安装 [默认]"
+        echo "  2) 导入旧链接 (手动粘贴)"
+        local choice
+        read -t 30 -rp "  > 请选择 (1-2, 30秒后默认 1): " choice || true
+        choice=${choice:-1}
+        if [[ "$choice" == "2" ]]; then
+            read -rp "请粘贴旧的 Wallos 面板链接 (例如 https://wallos.xxx.com:8443): " old_wal_link
+            if [[ -n "$old_wal_link" ]]; then
+                if [[ "$old_wal_link" =~ ^https://([^/:]+) ]]; then
+                    old_wal_domain="${BASH_REMATCH[1]}"
+                    log_success "成功提取旧配置: 域名=$old_wal_domain"
+                else
+                    log_warn "未能识别链接格式，将使用常规方式配置。"
                 fi
             fi
         fi
@@ -1423,7 +1420,7 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx
+    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
     
     echo ""
     log_success "Wallos 部署完成！"
