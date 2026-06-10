@@ -3106,7 +3106,7 @@ update_script() {
     local vpsge_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"
     # --------------------------------------------------------------------------------------------------
 
-    if [[ -z "$vpsge_REMOTE_URL" || "$vpsge_REMOTE_URL" == *"https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"* ]]; then
+    if [[ -z "$vpsge_REMOTE_URL" || "$vpsge_REMOTE_URL" == *"bash <(curl -sL https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh)"* ]]; then
         log_error "更新失败：未配置真实的脚本直链 (vpsge_REMOTE_URL)。请在脚本源码中修改该变量。"
         press_enter
         return
