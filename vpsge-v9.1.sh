@@ -9,6 +9,12 @@
 set -e  
 
 # ────────────────────────────────────────────────────────────────
+#  全局变量 & 直链配置
+# ────────────────────────────────────────────────────────────────
+VPSGE_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"
+SCRIPT_VERSION="vpsge-v9"
+
+# ────────────────────────────────────────────────────────────────
 #  颜色 & 日志
 # ────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -20,7 +26,6 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SCRIPT_VERSION="vpsge-v9"
 STOPPED_SERVICES=()
 DOMAINS=()
 MAIN_DOMAIN=""
@@ -3142,22 +3147,13 @@ update_script() {
     echo -e "${BOLD}${CYAN}══ 更新脚本 ══${NC}"
     echo ""
     log_step "正在检查更新..."
-    # --------------------------------------------------------------------------------------------------
-    # 【更新配置区】请在这里填写您存放在 GitHub 上的原始 vpsge-v9.sh 的 Raw 直链！
-    # --------------------------------------------------------------------------------------------------
-    local vpsge_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"
-    # --------------------------------------------------------------------------------------------------
-
-    if [[ -z "$vpsge_REMOTE_URL" || "$vpsge_REMOTE_URL" == *"bash <(curl -sL https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh)"* ]]; then
-        log_error "更新失败：未配置真实的脚本直链 (vpsge_REMOTE_URL)。请在脚本源码中修改该变量。"
-        press_enter
-        return
-    fi
 
     local target="/tmp/vpsge_update.sh"
-    if curl -fsSL --connect-timeout 10 --max-time 30 "$vpsge_REMOTE_URL" -o "$target"; then
+    
+    # 直接使用全局直链拉取更新
+    if curl -fsSL --connect-timeout 10 --max-time 30 "$VPSGE_REMOTE_URL" -o "$target"; then
         if grep -q "vpsge" "$target"; then
-            mv "$target" /usr/bin/vpsge
+            mv -f "$target" /usr/bin/vpsge
             chmod 755 /usr/bin/vpsge
             log_success "脚本已成功从 GitHub 拉取并更新至最新版本！"
             echo -e "${YELLOW}请重新输入命令 ${BOLD}${GREEN}vpsge${NC}${YELLOW} 以启动最新版。${NC}"
@@ -4077,24 +4073,30 @@ main_menu() {
 # ────────────────────────────────────────────────────────────────
 #  安装 vpsge 快捷命令
 # ────────────────────────────────────────────────────────────────
-# 这里定义了用于本地快捷部署的名称，不需要改动。脚本云端更新地址请在上面 `update_script` 函数里修改。
-vpsge_LOCAL_MAPPING="vpsge"
-
 install_self() {
     local target="/usr/bin/vpsge"
+    
+    # 如果当前正在 /usr/bin/vpsge 执行，则无需安装
     [[ "$0" == "$target" ]] && return 0
 
-    local current_ver=""
-    if [[ -s "$target" ]]; then
-        current_ver=$(grep -oP '^SCRIPT_VERSION="\K[^"]+' "$target" 2>/dev/null | head -1)
-        [[ "$current_ver" == "$SCRIPT_VERSION" ]] && return 0
+    # 判断是否为本地文件正常运行，若是则直接复制
+    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
+        cp -f "$0" "$target"
+        chmod 755 "$target"
+    else
+        # 否则判定为通过 bash <(curl ...) 执行流，强制从直链拉取文件创建快捷命令
+        curl -fsSL --connect-timeout 10 "$VPSGE_REMOTE_URL" -o "$target" 2>/dev/null || \
+        wget -qO "$target" "$VPSGE_REMOTE_URL" 2>/dev/null
+        
+        if [[ -f "$target" ]]; then
+            chmod 755 "$target"
+        fi
     fi
 
-    if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
-        install -m 755 "$0" "$target" 2>/dev/null || true
+    # 验证是否安装成功并刷新 hash
+    if command -v vpsge &>/dev/null; then
         log_success "已安装快捷命令: vpsge"
     fi
-
     command -v hash &>/dev/null && hash -r
 }
 
