@@ -246,9 +246,8 @@ get_cert_domains() {
 select_server_name() {
     local default_sn="${1:-example.com}"
     local old_sni="$2"
-    local target_idx="${3:-1}" # 默认选择的编号
+    local target_idx="${3:-1}"
 
-    # 兼容原本传递 "true" 的情况（原本 wallos 可能传的是 "true"）
     if [[ "$target_idx" == "true" ]]; then
         target_idx=2
     fi
@@ -288,7 +287,6 @@ select_server_name() {
         echo -e "    ${YELLOW}${manual_idx})${NC} 手动输入其他域名"
         echo ""
         
-        # 如果指定的默认索引大于实际的域名数量，防错回退到 1
         local actual_default_idx=$target_idx
         if [[ "$actual_default_idx" -gt "${#domains[@]}" ]]; then
             actual_default_idx=1
@@ -633,9 +631,8 @@ manage_web_services_ssl() {
 }
 
 open_firewall_ports() {
-    log_step "检查并自动放行本地防火墙端口 (80/443/8080/8443)..."
+    log_step "检查并自动放行本地防火墙常规端口 (80/443/8080/8443/3001/8282)..."
     
-    # 增加 iptables 原生兜底机制，无视上层拦截
     if is_cmd_exist iptables; then
         iptables -I INPUT -p tcp -m multiport --dports 80,443,8080,8443,3001,8282 -j ACCEPT 2>/dev/null || true
         is_cmd_exist iptables-save && iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
@@ -646,24 +643,25 @@ open_firewall_ports() {
     fi
     
     if is_cmd_exist ufw && ufw status | grep -q "Status: active"; then
-        log_info "检测到 UFW 防火墙处于开启状态，正在放行端口..."
         ufw allow 80/tcp >/dev/null 2>&1 || true
         ufw allow 443/tcp >/dev/null 2>&1 || true
         ufw allow 8080/tcp >/dev/null 2>&1 || true
         ufw allow 8443/tcp >/dev/null 2>&1 || true
+        ufw allow 3001/tcp >/dev/null 2>&1 || true
+        ufw allow 8282/tcp >/dev/null 2>&1 || true
         ufw reload >/dev/null 2>&1
-        log_success "UFW 防火墙放行成功"
     fi
 
     if is_cmd_exist firewall-cmd && systemctl is-active --quiet firewalld; then
-        log_info "检测到 Firewalld 防火墙处于开启状态，正在放行端口..."
         firewall-cmd --zone=public --add-port=80/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=443/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=8080/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --zone=public --add-port=8443/tcp --permanent >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=3001/tcp --permanent >/dev/null 2>&1 || true
+        firewall-cmd --zone=public --add-port=8282/tcp --permanent >/dev/null 2>&1 || true
         firewall-cmd --reload >/dev/null 2>&1
-        log_success "Firewalld 防火墙放行成功"
     fi
+    log_success "基础网络服务端口放行成功"
 }
 
 deploy_ssl() {
@@ -951,107 +949,6 @@ menu_ssl() {
 }
 
 # ────────────────────────────────────────────────────────────────
-#  卸载功能合集
-# ────────────────────────────────────────────────────────────────
-uninstall_singbox() {
-    echo -e "${YELLOW}警告：这将彻底删除 sing-box 及其所有配置文件！${NC}"
-    read -rp "确认卸载？(y/N): " choice
-    if [[ "${choice,,}" == "y" ]]; then
-        systemctl stop sing-box 2>/dev/null || true
-        systemctl disable sing-box 2>/dev/null || true
-        rm -f /etc/systemd/system/sing-box.service
-        systemctl daemon-reload 2>/dev/null || true
-        rm -rf /etc/sing-box /var/log/sing-box /var/lib/sing-box
-        
-        # 彻底清理包管理器安装的版本
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt purge -y sing-box 2>/dev/null || true
-        elif [[ -n "$PKG_MANAGER" ]]; then
-            $PKG_MANAGER remove -y sing-box 2>/dev/null || true
-        fi
-        
-        # 彻底移除所有可能的 sing-box 二进制路径
-        rm -f /usr/local/bin/sing-box /usr/bin/sing-box /usr/sbin/sing-box /usr/local/sbin/sing-box /bin/sing-box
-        for bin in $(type -aP sing-box 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
-        
-        # 刷新 Bash 命令缓存，防止卸载后依旧误报存在
-        hash -r 2>/dev/null || true
-        log_success "sing-box 已彻底卸载"
-    fi
-}
-
-uninstall_nginx() {
-    echo -e "${YELLOW}警告：这将彻底删除 Nginx 及其所有站点配置！${NC}"
-    read -rp "确认卸载？(y/N): " choice
-    if [[ "${choice,,}" == "y" ]]; then
-        systemctl stop nginx 2>/dev/null || true
-        systemctl disable nginx 2>/dev/null || true
-        
-        # 彻底清理包管理器安装的版本
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt purge -y nginx nginx-common nginx-core 2>/dev/null || true
-            apt autoremove -y 2>/dev/null || true
-        elif [[ -n "$PKG_MANAGER" ]]; then
-            $PKG_MANAGER remove -y nginx 2>/dev/null || true
-        fi
-        
-        rm -rf /etc/nginx /var/log/nginx /var/www/html /usr/sbin/nginx /usr/bin/nginx
-        
-        # 彻底移除所有可能的 nginx 二进制路径
-        rm -f /usr/sbin/nginx /usr/bin/nginx /usr/local/sbin/nginx /usr/local/bin/nginx /bin/nginx
-        for bin in $(type -aP nginx 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
-        
-        # 刷新 Bash 命令缓存
-        hash -r 2>/dev/null || true
-        log_success "Nginx 已彻底卸载"
-    fi
-}
-
-uninstall_docker() {
-    echo -e "${YELLOW}警告：这将彻底删除 Docker 环境及其所有容器和镜像！${NC}"
-    read -rp "确认卸载？(y/N): " choice
-    if [[ "${choice,,}" == "y" ]]; then
-        log_step "1. 正在停止并删除所有正在运行的 Docker 容器..."
-        docker ps -aq 2>/dev/null | xargs -r docker stop 2>/dev/null || true
-        docker ps -aq 2>/dev/null | xargs -r docker rm 2>/dev/null || true
-
-        log_step "2. 正在全面停止 Docker、Socket 及 containerd 底层核心服务..."
-        systemctl stop docker docker.socket containerd containerd.service 2>/dev/null || true
-        systemctl disable docker docker.socket containerd containerd.service 2>/dev/null || true
-
-        log_step "3. 正在强制解除所有残留的内核虚拟挂载点 (overlay2/containerd)..."
-        if [ -f /proc/mounts ]; then
-            cat /proc/mounts | grep -E '/var/lib/(docker|containerd)' | awk '{print $2}' | sort -r | while read -r mnt; do
-                umount -fl "$mnt" 2>/dev/null || true
-            done
-        fi
-
-        log_step "4. 正在卸载 Docker 相关核心软件包..."
-        if [[ "$PKG_MANAGER" == "apt" ]]; then
-            apt purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-doc docker-compose podman-docker 2>/dev/null || true
-            apt autoremove -y 2>/dev/null || true
-        elif [[ -n "$PKG_MANAGER" ]]; then
-            $PKG_MANAGER remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || true
-        fi
-
-        log_step "5. 正在彻底清空物理残留目录、缓存、套接字与配置文件..."
-        rm -rf /var/lib/docker /var/lib/containerd /var/run/docker.sock /var/run/containerd /etc/docker /root/.docker /usr/bin/docker /usr/libexec/docker
-        
-        # 彻底移除可能残留的二进制文件
-        for bin in $(type -aP docker 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
-        
-        # 刷新 Bash 命令缓存
-        hash -r 2>/dev/null || true
-
-        log_step "6. 正在刷新重置 systemd 系统服务状态..."
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl reset-failed 2>/dev/null || true
-
-        log_success "Docker 环境已完美、干净地彻底卸载！无任何底层状态残留。"
-    fi
-}
-
-# ────────────────────────────────────────────────────────────────
 #  三、安装服务（sing-box / Nginx / Docker环境 / 面板 / Realm）
 # ────────────────────────────────────────────────────────────────
 install_nginx() {
@@ -1074,7 +971,7 @@ install_nginx() {
 
     if [[ "$PKG_MANAGER" == "apt" ]]; then
         apt update -y >/dev/null 2>&1 || true
-        # 核心防瘫痪修复：使用 --force-confmiss 强制恢复任何缺失的默认配置文件 (如被误删的 nginx.conf)
+        # 核心防瘫痪修复：使用 --force-confmiss 强制恢复任何缺失的默认配置文件
         DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::="--force-confmiss" install -y nginx || { log_error "Nginx 安装失败"; return 1; }
     else
         $PKG_MANAGER install -y nginx || { log_error "Nginx 安装失败"; return 1; }
@@ -1172,9 +1069,9 @@ install_substore() {
         
         if [[ "$choice" == "3" ]]; then
             read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
-            if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
+            if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+(:[0-9]+)?/([^/\?]+) ]]; then
                 old_sub_domain="${BASH_REMATCH[1]}"
-                old_sub_api="${BASH_REMATCH[2]}"
+                old_sub_api="${BASH_REMATCH[3]}"
                 log_success "成功提取旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
             else
                 log_warn "未能识别链接格式，将使用常规方式配置。"
@@ -1189,9 +1086,9 @@ install_substore() {
         choice=${choice:-1}
         if [[ "$choice" == "2" ]]; then
             read -rp "请粘贴旧的 Sub-Store 面板链接 (如 https://sub.xxx.com:8443/?api=...): " old_sub_link
-            if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+:[0-9]+/([^/]+) ]]; then
+            if [[ "$old_sub_link" =~ ^https://([^/:]+).*api=https://[^/:]+(:[0-9]+)?/([^/\?]+) ]]; then
                 old_sub_domain="${BASH_REMATCH[1]}"
-                old_sub_api="${BASH_REMATCH[2]}"
+                old_sub_api="${BASH_REMATCH[3]}"
                 log_success "成功提取旧配置: 域名=$old_sub_domain, API路径=/$old_sub_api"
             else
                 log_warn "未能识别链接格式，将使用常规方式配置。"
@@ -1238,15 +1135,12 @@ install_substore() {
     local cp=""
     local kp=""
     
-    # 强制跳过确认，自动应用旧域名和证书
     if [[ -n "$old_sub_domain" ]]; then
         sn="$old_sub_domain"
-        local prev_auto="$AUTO_DEFAULT"
-        AUTO_DEFAULT="true"
+        # 强制显式确认证书路径，防止重装系统后旧链接默认证书路径失效导致无法启动
         ask_cert_paths "$sn"
         cp="$CERT_PATH"
         kp="$KEY_PATH"
-        AUTO_DEFAULT="$prev_auto"
     else
         # 强制在选择域名时弹出版单给出选择（Sub-Store 默认选项 1）
         local prev_auto="$AUTO_DEFAULT"
@@ -1263,7 +1157,7 @@ install_substore() {
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
         log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
-        log_warn "请后续确保将正确的证书文件放置于: $cp"
+        log_warn "请确认后续已经将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/substore/data
@@ -1336,7 +1230,6 @@ EOF
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
     
-    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/substore.conf <<EOF
 server {
     listen 8080;
@@ -1364,7 +1257,12 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请检查配置文件或证书是否存在"
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    else
+        log_error "Nginx 配置检测失败，可能是由于证书路径不正确导致！"
+        log_warn "请确保证书正确放置，并手动重启 Nginx 以恢复面板访问。"
+    fi
     
     echo ""
     log_success "Sub-Store 部署完成！"
@@ -1454,12 +1352,10 @@ install_wallos() {
     local kp=""
     if [[ -n "$old_wal_domain" ]]; then
         sn="$old_wal_domain"
-        local prev_auto="$AUTO_DEFAULT"
-        AUTO_DEFAULT="true"
+        # 强制显式确认证书路径，防止重装系统后旧链接默认证书路径失效导致无法启动
         ask_cert_paths "$sn"
         cp="$CERT_PATH"
         kp="$KEY_PATH"
-        AUTO_DEFAULT="$prev_auto"
     else
         while true; do
             # 强制在选择域名时弹出版单给出选择（Wallos 默认选项 2）
@@ -1488,7 +1384,7 @@ install_wallos() {
     if [[ ! -f "$cp" || ! -f "$kp" ]]; then
         log_warn "⚠️ 警告：检测到证书或私钥文件实际不存在！"
         log_warn "Nginx 代理极有可能因此启动失败，导致面板无法访问！"
-        log_warn "请后续确保将正确的证书文件放置于: $cp"
+        log_warn "请确认后续已经将正确的证书文件放置于: $cp"
     fi
 
     mkdir -p /root/docker/wallos/{db,logos}
@@ -1523,7 +1419,6 @@ EOF
     open_firewall_ports
     mkdir -p /etc/nginx/conf.d
     
-    # 修复兼容性：移除 Nginx 1.27+ 中已废弃引发致命报错阻断启动的 http2 参数，确保面板能顺利暴露
     cat > /etc/nginx/conf.d/wallos.conf <<EOF
 server {
     listen 8080;
@@ -1548,7 +1443,12 @@ server {
     }
 }
 EOF
-    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || log_warn "Nginx 重载失败，请后续检查配置文件或证书是否存在"
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+    else
+        log_error "Nginx 配置检测失败，可能是由于证书路径不正确导致！"
+        log_warn "请确保证书正确放置，并手动重启 Nginx 以恢复面板访问。"
+    fi
     
     echo ""
     log_success "Wallos 部署完成！"
@@ -3224,8 +3124,28 @@ EOF
                 fi
             fi
 
-            # 核心优化：配置完成后自动启动 sing-box 并保持运行
+            # 核心优化：自动穿透防火墙放行配置端口，确保重装系统或全新生成时连通性
             if [[ $_check_rc -eq 0 ]] || [[ -z "$_real_errors" ]]; then
+                log_info "检查并自动放行 sing-box 节点所需防火墙端口..."
+                local ports_to_open=$(grep -oP '"listen_port":\s*\K\d+' /etc/sing-box/config.json | sort -u 2>/dev/null)
+                for pt in $ports_to_open; do
+                    if is_cmd_exist iptables; then
+                        iptables -I INPUT -p tcp --dport $pt -j ACCEPT 2>/dev/null || true
+                        iptables -I INPUT -p udp --dport $pt -j ACCEPT 2>/dev/null || true
+                    fi
+                    if is_cmd_exist ufw && ufw status | grep -q "Status: active" 2>/dev/null; then
+                        ufw allow $pt/tcp >/dev/null 2>&1 || true
+                        ufw allow $pt/udp >/dev/null 2>&1 || true
+                    fi
+                    if is_cmd_exist firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
+                        firewall-cmd --zone=public --add-port=${pt}/tcp --permanent >/dev/null 2>&1 || true
+                        firewall-cmd --zone=public --add-port=${pt}/udp --permanent >/dev/null 2>&1 || true
+                    fi
+                done
+                is_cmd_exist iptables-save && iptables-save >/etc/iptables/rules.v4 2>/dev/null || true
+                if is_cmd_exist firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then firewall-cmd --reload >/dev/null 2>&1 || true; fi
+                log_success "防火墙放行完成，保障连通性"
+
                 log_info "正在自动启动 sing-box 并加入系统守护进程..."
                 systemctl enable sing-box >/dev/null 2>&1 || true
                 systemctl restart sing-box >/dev/null 2>&1 || true
@@ -3304,7 +3224,6 @@ menu_manage_singbox() {
         echo "  8) 实时查看日志"
         echo "  9) 验证配置文件"
         echo " 10) 一键修复配置（移除旧 dns/route 段）"
-        echo " 11) 卸载 sing-box"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -3379,7 +3298,6 @@ menu_manage_singbox() {
                 fi
                 press_enter ;;
             10) fix_dns_format; press_enter ;;
-            11) uninstall_singbox; press_enter ;;
             0) return ;;
             *) log_warn "无效选项"; sleep 1 ;;
         esac
@@ -3414,7 +3332,6 @@ menu_manage_nginx() {
         echo "  4) 验证 Nginx 配置 (nginx -t)"
         echo "  5) 设为开机自启"
         echo "  6) 实时查看错误日志"
-        echo "  7) 卸载 Nginx"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -3457,7 +3374,6 @@ menu_manage_nginx() {
                     tail -f /var/log/nginx/error.log
                 else log_error "日志文件不存在或 Nginx 未安装"; press_enter; fi
                 ;;
-            7) uninstall_nginx; press_enter ;;
             0) return ;;
             *) log_warn "无效选项"; sleep 1 ;;
         esac
@@ -3490,7 +3406,6 @@ menu_manage_docker() {
         echo "  2) 停止 Docker"
         echo "  3) 重启 Docker"
         echo "  4) 查看 Docker 状态"
-        echo "  5) 卸载 Docker"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -3517,7 +3432,6 @@ menu_manage_docker() {
                     systemctl status docker --no-pager || true
                 else log_error "Docker 未安装"; fi
                 press_enter ;;
-            5) uninstall_docker; press_enter ;;
             0) return ;;
             *) log_warn "无效选项"; sleep 1 ;;
         esac
@@ -3551,7 +3465,7 @@ menu_manage_substore() {
         echo "  3) 重启 Sub-Store"
         echo "  4) 查看实时日志"
         echo "  5) 找回面板访问地址"
-        echo "  6) 卸载 Sub-Store"
+        echo "  6) 彻底卸载 Sub-Store"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -3573,13 +3487,15 @@ menu_manage_substore() {
                 press_enter
                 ;;
             6)
-                echo -e "${YELLOW}警告：这将彻底删除 Sub-Store 及其所有数据！${NC}"
+                echo -e "${YELLOW}警告：这将彻底删除 Sub-Store 及其所有数据、代理配置！${NC}"
                 read -rp "确认卸载？(y/N): " choice
                 if [[ "${choice,,}" == "y" ]]; then
                     docker stop substore 2>/dev/null || true
                     docker rm substore 2>/dev/null || true
                     rm -rf /root/docker/substore
-                    log_success "Sub-Store 已彻底卸载"
+                    rm -f /etc/nginx/conf.d/substore.conf
+                    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+                    log_success "Sub-Store 已彻底卸载，不留任何痕迹"
                 fi
                 press_enter
                 ;;
@@ -3616,7 +3532,7 @@ menu_manage_wallos() {
         echo "  3) 重启 Wallos"
         echo "  4) 查看实时日志"
         echo "  5) 找回面板访问地址"
-        echo "  6) 卸载 Wallos"
+        echo "  6) 彻底卸载 Wallos"
         echo ""
         echo "  0) 返回上一级"
         echo ""
@@ -3637,13 +3553,15 @@ menu_manage_wallos() {
                 press_enter
                 ;;
             6)
-                echo -e "${YELLOW}警告：这将彻底删除 Wallos 及其所有数据！${NC}"
+                echo -e "${YELLOW}警告：这将彻底删除 Wallos 及其所有数据、代理配置！${NC}"
                 read -rp "确认卸载？(y/N): " choice
                 if [[ "${choice,,}" == "y" ]]; then
                     docker stop wallos 2>/dev/null || true
                     docker rm wallos 2>/dev/null || true
                     rm -rf /root/docker/wallos
-                    log_success "Wallos 已彻底卸载"
+                    rm -f /etc/nginx/conf.d/wallos.conf
+                    systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
+                    log_success "Wallos 已彻底卸载，不留任何痕迹"
                 fi
                 press_enter
                 ;;
