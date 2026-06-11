@@ -11,7 +11,7 @@ set -e
 # ────────────────────────────────────────────────────────────────
 #  全局变量 & 直链配置
 # ────────────────────────────────────────────────────────────────
-VPSGE_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.1.sh"
+VPSGE_REMOTE_URL="https://raw.githubusercontent.com/github19999/Ojddj/main/vpsge-v9.2.sh"
 SCRIPT_VERSION="vpsge-v9"
 
 # ────────────────────────────────────────────────────────────────
