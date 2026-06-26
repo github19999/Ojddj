@@ -2,7 +2,7 @@
 # ================================================================
 #   服务器一键管理脚本 (vpsge)
 #   版本号：vpsge-v1
-#   集成：SSH安全加固 / SSL证书 / sing-box & Xray /节点生成 / Realm 转发
+#   集成：SSH安全加固 / SSL证书 / sing-box & Xray 安装配置 /节点生成 / Realm 转发
 # ================================================================
 
 # 遇到错误立即退出
@@ -44,7 +44,7 @@ log_success() { echo -e "${GREEN}[✓]${NC} $*"; }
 press_enter() { echo ""; read -rp "$(echo -e "${CYAN}按 Enter 返回...${NC}")"; }
 
 # ────────────────────────────────────────────────────────────────
-#  强力全局命令探测
+#  强力全局命令探测 (无视 $PATH 缺失和 Hash 缓存异常)
 # ────────────────────────────────────────────────────────────────
 is_cmd_exist() {
     local cmd="$1"
@@ -812,7 +812,7 @@ deploy_ssl() {
     manage_web_services_ssl "stop"
     open_firewall_ports
     
-    log_info "配置智能续期 Hook..."
+    log_info "配置智能续期 Hook，确保未来 Web 服务的无缝证书自动续期..."
     cat > /root/.acme.sh/vpsge_hook.sh << 'EOF'
 #!/bin/bash
 ACTION=$1
@@ -884,7 +884,7 @@ EOF
         return 1
     fi
 
-    log_success "智能续期 Hook 注册完成。"
+    log_success "智能续期 Hook 注册完成。未来无论您何时安装 Nginx 等服务，续期程序均会自动感知并智能避让防冲突。"
 
     log_step "设置证书自动续期..."
     local LOG_FILE="/var/log/acme-renew.log"
@@ -978,14 +978,15 @@ uninstall_xray() {
     echo -e "${YELLOW}警告：这将彻底删除 Xray 及其所有配置文件！${NC}"
     read -rp "确认卸载？(y/N): " choice
     if [[ "${choice,,}" == "y" ]]; then
-        if is_cmd_exist xray || [[ -f /usr/local/bin/xray ]]; then
-            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove
-            rm -rf /usr/local/etc/xray /var/log/xray
-            hash -r 2>/dev/null || true
-            log_success "Xray 已彻底卸载"
-        else
-            log_warn "未检测到 Xray 的安装。"
-        fi
+        systemctl stop xray 2>/dev/null || true
+        systemctl disable xray 2>/dev/null || true
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge 2>/dev/null || true
+        rm -f /etc/systemd/system/xray.service
+        systemctl daemon-reload 2>/dev/null || true
+        rm -rf /usr/local/etc/xray /var/log/xray /usr/local/share/xray
+        rm -f /usr/local/bin/xray
+        hash -r 2>/dev/null || true
+        log_success "Xray 已彻底卸载"
     fi
 }
 
@@ -1046,20 +1047,18 @@ uninstall_docker() {
         for bin in $(type -aP docker 2>/dev/null); do rm -f "$bin" 2>/dev/null || true; done
         
         hash -r 2>/dev/null || true
+
+        log_step "6. 正在刷新重置 systemd 系统服务状态..."
         systemctl daemon-reload 2>/dev/null || true
         systemctl reset-failed 2>/dev/null || true
 
-        log_success "Docker 环境已完美、干净地彻底卸载！"
+        log_success "Docker 环境已完美、干净地彻底卸载！无任何底层状态残留。"
     fi
 }
 
-install_xray() {
-    log_step "安装 Xray-core..."
-    if ! prompt_reinstall "Xray"; then return 0; fi
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    log_success "Xray 安装完成"
-}
-
+# ────────────────────────────────────────────────────────────────
+#  三、安装服务
+# ────────────────────────────────────────────────────────────────
 install_nginx() {
     local mode="${1:-1}"
     log_step "安装 Nginx..."
@@ -1734,7 +1733,40 @@ menu_manage_realm() {
         esac
     done
 }
-# ----------------------------------------------------------
+
+install_xray() {
+    local mode="${1:-1}"
+    log_step "安装 Xray-core..."
+    
+    if is_cmd_exist xray; then
+        local ver
+        ver=$(xray version 2>/dev/null | head -1)
+        log_info "当前已安装版本: $ver"
+        if ! prompt_reinstall "Xray"; then return 0; fi
+    fi
+
+    if [[ "$mode" == "2" ]]; then
+        read -rp "请输入 Xray 版本号 (例如 1.8.4，回车跳过使用默认): " x_ver
+        if [[ -n "$x_ver" ]]; then
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version "$x_ver" || { log_error "Xray 安装失败"; return 1; }
+        else
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || { log_error "Xray 安装失败"; return 1; }
+        fi
+    elif [[ "$mode" == "3" ]]; then
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --beta || { log_error "Xray 安装失败"; return 1; }
+    else
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install || { log_error "Xray 安装失败"; return 1; }
+    fi
+    
+    systemctl enable xray >/dev/null 2>&1 || true
+    systemctl start xray >/dev/null 2>&1 || true
+    
+    if systemctl is-active --quiet xray; then
+        log_success "Xray 安装并启动成功"
+    else
+        log_warn "Xray 已安装，但未能成功运行，请检查配置文件是否正确生成"
+    fi
+}
 
 menu_install_service() {
     while true; do
@@ -1745,7 +1777,6 @@ menu_install_service() {
         echo "  1) 安装 sing-box 最新稳定版"
         echo "  2) 安装 sing-box 指定版本号"
         echo "  3) 安装 sing-box Beta / 预发布版"
-        echo " 16) 安装 Xray 最新版 (Reality 官方模板/xhttp 用)"
         echo ""
         echo -e "  ${CYAN}── Nginx (用于反代和回落) ──${NC}"
         echo "  4) 安装 Nginx 最新稳定版"
@@ -1768,12 +1799,17 @@ menu_install_service() {
         echo " 15) 安装 Wallos Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Realm (端口转发工具) ──${NC}"
-        echo " 17) 进入 Realm 管理面板 (部署/转发/卸载)"
+        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载)"
+        echo ""
+        echo -e "  ${CYAN}── 核心代理 (Xray) ──${NC}"
+        echo " 17) 安装 Xray 最新稳定版"
+        echo " 18) 安装 Xray 指定版本号"
+        echo " 19) 安装 Xray Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
         echo -e " ${YELLOW}101) 全部手动执行 (所有服务)${NC}"
-        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 16 170，默认 0）${NC}"
+        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 16 17，默认 0）${NC}"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -1782,13 +1818,13 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 16 170)
+            SVC_CHOICES=(1 4 7 10 13 16 17)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 16 170)
+            SVC_CHOICES=(1 4 7 10 13 16 17)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
-            read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
+            read -rp "请输入服务编号（例如 1 4 7 17，以空格隔开）: " -a SVC_CHOICES
             AUTO_DEFAULT=false
         else
             read -ra SVC_CHOICES <<< "$vc_raw"
@@ -1897,7 +1933,7 @@ EOF
                                 systemctl start sing-box >/dev/null 2>&1 || true
                             fi
                         else
-                            log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置代理节点」生成配置，完成后系统将自动守护运行。"
+                            log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置节点」生成配置，完成后系统将自动守护运行。"
                         fi
                     else
                         log_error "sing-box 安装失败"
@@ -1916,9 +1952,10 @@ EOF
                 13) install_wallos 1; [[ "$is_batch" == "false" ]] && press_enter ;;
                 14) install_wallos 2; [[ "$is_batch" == "false" ]] && press_enter ;;
                 15) install_wallos 3; [[ "$is_batch" == "false" ]] && press_enter ;;
-                16) install_xray; [[ "$is_batch" == "false" ]] && press_enter ;;
-                17) menu_manage_realm ;;
-                170) deploy_realm; [[ "$is_batch" == "false" ]] && press_enter ;;
+                16) menu_manage_realm ;;
+                17) install_xray 1; [[ "$is_batch" == "false" ]] && press_enter ;;
+                18) install_xray 2; [[ "$is_batch" == "false" ]] && press_enter ;;
+                19) install_xray 3; [[ "$is_batch" == "false" ]] && press_enter ;;
                 *) log_warn "未知选项或服务: $vc，跳过"; sleep 1 ;;
             esac
         done
@@ -1932,7 +1969,7 @@ EOF
 
 
 # ────────────────────────────────────────────────────────────────
-#  四、配置代理 — 各协议 build_* 函数
+#  四、配置代理节点 (sing-box / Xray) — 各协议 build_* 函数
 # ────────────────────────────────────────────────────────────────
 
 build_vless_tcp() {
@@ -2087,17 +2124,19 @@ build_vless_grpc() {
 EOF
 }
 
-build_vless_reality_singbox() {
+build_vless_reality() {
     local _jf="$1"
     echo ""
-    echo -e "${CYAN}  ─── VLESS — REALITY (sing-box 原版兼容) ───${NC}"
+    echo -e "${CYAN}  ─── VLESS — REALITY ───${NC}"
     echo ""
 
     local port uuid pk si sn hs_server hs_port
+
     ask_val port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
     ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
 
     local privkey pubkey existing_pk="" existing_pub=""
+    
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box 2>/dev/null || true
 
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
@@ -2105,25 +2144,30 @@ build_vless_reality_singbox() {
         pubkey="$OLD_VLESS_REALITY_PBK"
         echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
     else
+        if [[ -f /etc/sing-box/config.json ]]; then
+            existing_pk=$(grep -oP '"private_key":\s*"\K[^"]+' /etc/sing-box/config.json | head -1)
+        fi
         if [[ -f /etc/sing-box/reality_meta.conf ]]; then
             existing_pub=$(grep -oP "^${port}:\K.*" /etc/sing-box/reality_meta.conf | head -1)
         fi
 
-        if [[ -n "$existing_pub" ]]; then
-            log_warn "已检测到公钥，将生成新的匹配私钥对 (请确保客户端更新！)..."
-        fi
-
-        log_info "正在生成全新 REALITY 密钥对..."
-        if is_cmd_exist sing-box; then
-            local keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
-            privkey=$(echo "$keypair_out" | awk '/PrivateKey/ {print $2}')
-            pubkey=$(echo "$keypair_out" | awk '/PublicKey/ {print $2}')
-        fi
-        
-        if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
-            log_warn "未检测到有效环境，系统已自动派发高强度合规 x25519 备用密钥。"
-            privkey="yB2oP1N8o-Oq7a6-E2v1xP_2o9D7tE4iB8A5oG3_d00"
-            pubkey="W3-jL1kE_pG4z-1d4C2_eD0F4sT_k8GzU2X9xK_T_m8"
+        if [[ -n "$existing_pk" && -n "$existing_pub" && "$existing_pk" != '""' ]]; then
+            privkey="$existing_pk"
+            pubkey="$existing_pub"
+            echo -e "  ${GREEN}★ 检测到本地已有 REALITY 密钥对，自动沿用！${NC}"
+        else
+            log_info "正在生成全新 REALITY 密钥对..."
+            local keypair_out
+            if is_cmd_exist sing-box; then
+                keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
+                privkey=$(echo "$keypair_out" | awk '/PrivateKey/ {print $2}')
+                pubkey=$(echo "$keypair_out" | awk '/PublicKey/ {print $2}')
+            fi
+            
+            if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
+                privkey="yB2oP1N8o-Oq7a6-E2v1xP_2o9D7tE4iB8A5oG3_d00"
+                pubkey="W3-jL1kE_pG4z-1d4C2_eD0F4sT_k8GzU2X9xK_T_m8"
+            fi
         fi
     fi
     
@@ -2142,6 +2186,7 @@ build_vless_reality_singbox() {
         echo -e "    (若需自定义，请同时替换)"
         echo ""
         echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
+        echo -e "    (回车使用上述值)"
         read -rp "  > " _pk_input
         pk="${_pk_input:-$privkey}"
         if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
@@ -2160,22 +2205,45 @@ build_vless_reality_singbox() {
     echo -e "  ${BOLD}${CYAN}    ${pubkey}${NC}"
     echo ""
 
-    echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名 / SNI）${NC}"
-    echo -e "    ${YELLOW}1)${NC} www.icloud.com [默认/推荐]"
-    echo -e "    ${YELLOW}2)${NC} www.yahoo.com"
-    echo -e "    ${YELLOW}3)${NC} 手动输入其他"
-    local sni_c
-    read -rp "  > (默认 1): " sni_c
-    sni_c=${sni_c:-1}
-    if [[ "$sni_c" == "1" ]]; then sn="www.icloud.com"
-    elif [[ "$sni_c" == "2" ]]; then sn="www.yahoo.com"
-    else read -rp "请输入伪装域名: " sn; fi
+    local _cert_domains=()
+    mapfile -t _cert_domains < <(get_cert_domains 2>/dev/null)
+    local _default_sn="www.microsoft.com"
+    if [[ ${#_cert_domains[@]} -ge 1 ]]; then
+        _default_sn="${_cert_domains[0]}"
+    fi
 
-    echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
+    if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
+        _default_sn="$OLD_VLESS_REALITY_SNI"
+    fi
+
+    if [[ "$AUTO_DEFAULT" == "true" ]]; then
+        sn="$_default_sn"
+        echo -e "  ${GREEN}✓ [自动] server_name = ${sn}${NC}"
+    else
+        echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名）${NC}"
+        echo -e "    可以填任意公网大厂网站"
+        if [[ -n "$OLD_VLESS_REALITY_SNI" ]]; then
+             echo -e "    ${YELLOW}检测到旧节点使用了 SNI: ${OLD_VLESS_REALITY_SNI}${NC}"
+        fi
+        read -rp "  > 手动输入 server_name (默认 ${_default_sn}): " sn
+        sn="${sn:-$_default_sn}"
+        echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
+    fi
     echo ""
 
-    ask_val hs_server "handshake server (填外部 SNI 域名，如果是自建站才填 127.0.0.1)" "$sn"
-    ask_val hs_port   "handshake port (通常 443)" "443"
+    local def_hs="127.0.0.1"
+    local def_hs_port="8001"
+    local is_local=false
+    for d in "${_cert_domains[@]}"; do
+        if [[ "$d" == "$sn" ]]; then is_local=true; break; fi
+    done
+    if [[ "$is_local" == "false" ]]; then
+        def_hs="$sn"
+        def_hs_port="443"
+    fi
+
+    ask_val hs_server "handshake server (填外部 SNI 域名，如果是自建站才填 127.0.0.1)" "$def_hs"
+    ask_val hs_port   "handshake port (外部通常 443，自建通常 8001)" "$def_hs_port"
 
     cat > "$_jf" << EOF
     {
@@ -2203,366 +2271,7 @@ EOF
     grep -v "^${port}:" "$_reality_meta" 2>/dev/null > "${_reality_meta}.tmp" || true
     echo "${port}:${pubkey}" >> "${_reality_meta}.tmp"
     mv "${_reality_meta}.tmp" "$_reality_meta"
-    log_success "Sing-box Reality 参数生成完毕。"
-    setup_nginx_reality "$sn"
-}
-
-build_xray_reality() {
-    local r_choice="$1"
-    echo ""
-    echo -e "${CYAN}  ─── Xray VLESS — REALITY / xhttp ───${NC}"
-    echo ""
-
-    if ! is_cmd_exist xray; then
-        log_info "检测到未安装 Xray，正在为您自动安装 Xray-core..."
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-        log_success "Xray 安装完成！"
-    fi
-    mkdir -p /usr/local/etc/xray
-
-    local port uuid pk si sn
-    ask_val port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
-    ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
-
-    local privkey pubkey existing_pk="" existing_pub=""
-    
-    if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
-        privkey="$OLD_VLESS_REALITY_PK"
-        pubkey="$OLD_VLESS_REALITY_PBK"
-        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
-    else
-        if [[ -f /usr/local/etc/xray/reality_pub.key ]]; then
-            existing_pub=$(cat /usr/local/etc/xray/reality_pub.key)
-        fi
-
-        if [[ -n "$existing_pub" ]]; then
-            log_warn "已检测到公钥，将生成新的匹配私钥对 (请确保客户端更新！)..."
-        fi
-
-        log_info "正在生成全新 REALITY 密钥对..."
-        local keypair_out=$(xray x25519 2>/dev/null || true)
-        privkey=$(echo "$keypair_out" | awk '/Private key:/ {print $3}')
-        pubkey=$(echo "$keypair_out" | awk '/Public key:/ {print $3}')
-        
-        if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
-            log_warn "未检测到有效环境，系统已自动派发高强度合规 x25519 备用密钥。"
-            privkey="yB2oP1N8o-Oq7a6-E2v1xP_2o9D7tE4iB8A5oG3_d00"
-            pubkey="W3-jL1kE_pG4z-1d4C2_eD0F4sT_k8GzU2X9xK_T_m8"
-        fi
-    fi
-    
-    local sid_rand
-    sid_rand=$(gen_short_id)
-    echo ""
-
-    if [[ "$AUTO_DEFAULT" == "true" ]]; then
-        pk="$privkey"
-        echo -e "  ${GREEN}✓ [自动] private_key = ${pk}${NC}"
-        echo -e "  ${GREEN}✓ [自动] public_key  = ${pubkey}${NC}"
-    else
-        echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用）${NC}"
-        echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
-        echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
-        echo -e "    (若需自定义，请同时替换)"
-        echo ""
-        echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
-        read -rp "  > " _pk_input
-        pk="${_pk_input:-$privkey}"
-        if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
-            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请输入对应的 public_key:${NC}"
-            read -rp "  > public_key: " pubkey
-        fi
-        echo -e "  ${GREEN}✓ private_key = ${pk}${NC}"
-        echo -e "  ${GREEN}✓ public_key  = ${pubkey}${NC}"
-    fi
-    echo ""
-
-    ask_random si "short_id（REALITY Short ID）" "${OLD_VLESS_REALITY_SID:-$sid_rand}"
-
-    echo ""
-    echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
-    echo -e "  ${BOLD}${CYAN}    ${pubkey}${NC}"
-    echo ""
-
-    echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名 / SNI）${NC}"
-    echo -e "    ${YELLOW}1)${NC} www.icloud.com [默认/推荐]"
-    echo -e "    ${YELLOW}2)${NC} www.yahoo.com"
-    echo -e "    ${YELLOW}3)${NC} 手动输入其他"
-    local sni_c
-    read -rp "  > (默认 1): " sni_c
-    sni_c=${sni_c:-1}
-    if [[ "$sni_c" == "1" ]]; then sn="www.icloud.com"
-    elif [[ "$sni_c" == "2" ]]; then sn="www.yahoo.com"
-    else read -rp "请输入伪装域名: " sn; fi
-
-    echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
-    echo ""
-
-    local xray_conf="/usr/local/etc/xray/config.json"
-    local xpath="/${uuid:0:8}"
-
-    # 1: 防偷跑 + 有流控 (Xray)
-    if [[ "$r_choice" == "1" ]]; then
-        cat > "$xray_conf" << EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "vless-reality-in",
-      "listen": "::",
-      "port": $port,
-      "protocol": "vless",
-      "settings": { "clients": [{ "id": "$uuid", "flow": "xtls-rprx-vision" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
-        }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
-    }
-  ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
-      { "type": "field", "domain": ["geosite:cn"], "outboundTag": "block" }
-    ]
-  }
-}
-EOF
-    # 2: 防偷跑 + 无流控 (Xray)
-    elif [[ "$r_choice" == "2" ]]; then
-        cat > "$xray_conf" << EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "vless-reality-in",
-      "listen": "::",
-      "port": $port,
-      "protocol": "vless",
-      "settings": { "clients": [{ "id": "$uuid" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
-        }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
-    }
-  ],
-  "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
-  ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
-      { "type": "field", "domain": ["geosite:cn"], "outboundTag": "block" }
-    ]
-  }
-}
-EOF
-    # 3: xhttp 原版 (Xray)
-    elif [[ "$r_choice" == "3" ]]; then
-        cat > "$xray_conf" << EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "xray-xhttp-in",
-      "listen": "::",
-      "port": $port,
-      "protocol": "vless",
-      "settings": { "clients": [{ "id": "$uuid", "flow": "", "email": "xray-xhttp" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false, "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
-        },
-        "xhttpSettings": { "path": "$xpath", "mode": "auto" }
-      }
-    }
-  ],
-  "outbounds": [
-    { "tag": "direct", "protocol": "freedom" },
-    { "tag": "block", "protocol": "blackhole" }
-  ],
-  "routing": {
-    "rules": []
-  }
-}
-EOF
-    # 4: xhttp 防偷跑版 (Xray)
-    elif [[ "$r_choice" == "4" ]]; then
-        cat > "$xray_conf" << EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "xray-xhttp-in",
-      "listen": "::",
-      "port": $port,
-      "protocol": "vless",
-      "settings": { "clients": [{ "id": "$uuid", "flow": "", "email": "xray-xhttp" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false, "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
-        },
-        "xhttpSettings": { "path": "$xpath", "mode": "auto" }
-      }
-    }
-  ],
-  "outbounds": [
-    { "tag": "direct", "protocol": "freedom" },
-    { "tag": "block", "protocol": "blackhole" }
-  ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
-      { "type": "field", "domain": ["geosite:cn"], "outboundTag": "block" }
-    ]
-  }
-}
-EOF
-    fi
-
-    echo "$pubkey" > /usr/local/etc/xray/reality_pub.key
-    log_success "Xray 配置文件已写入: $xray_conf"
-    
-    systemctl enable xray >/dev/null 2>&1 || true
-    systemctl restart xray >/dev/null 2>&1 || true
-    if systemctl is-active --quiet xray; then
-        log_success "Xray 已成功启动，并在后台保持运行！"
-    else
-        log_error "Xray 启动失败，请检查是否与其它程序存在端口冲突。"
-    fi
-}
-
-setup_nginx_reality() {
-    local domain="$1"
-    log_step "配置 Nginx REALITY 回落（域名: ${domain}）..."
-
-    if ! is_cmd_exist nginx; then
-        log_warn "Nginx 未安装，跳过自动配置（可在「三、安装服务」中安装 Nginx 后重新配置）"
-        return
-    fi
-
-    mkdir -p /var/www/html /etc/nginx/conf.d
-    if [[ ! -f /var/www/html/index.html ]]; then
-        cat > /var/www/html/index.html << 'HTML'
-<!DOCTYPE html><html><head><title>Welcome</title></head>
-<body><h1>It works!</h1></body></html>
-HTML
-    fi
-    chmod 644 /var/www/html/index.html
-    chmod 755 /var/www/html
-
-    local cert_path="" key_path=""
-    for d in /etc/ssl/private /etc/ssl/certs /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/fullchain.cer" ]] && cert_path="$d/fullchain.cer" && break
-    done
-    for d in /etc/ssl/private /etc/nginx/ssl /home/ssl; do
-        [[ -f "$d/private.key" ]] && key_path="$d/private.key" && break
-    done
-    [[ -z "$cert_path" && -f "/root/.acme.sh/${domain}/fullchain.cer" ]] && cert_path="/root/.acme.sh/${domain}/fullchain.cer"
-    [[ -z "$key_path"  && -f "/root/.acme.sh/${domain}/${domain}.key" ]] && key_path="/root/.acme.sh/${domain}/${domain}.key"
-    cert_path="${cert_path:-/etc/ssl/private/fullchain.cer}"
-    key_path="${key_path:-/etc/ssl/private/private.key}"
-
-    cat > /tmp/nginx.conf.template << 'EOF'
-user root;
-worker_processes auto;
-error_log /var/log/nginx/error.log notice;
-pid /var/run/nginx.pid;
-
-events {
-    worker_connections 1024;
-}
-
-http {
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-
-    log_format main '[$time_local] $proxy_protocol_addr "$http_referer" "$http_user_agent"';
-    access_log /var/log/nginx/access.log main;
-
-    map $http_upgrade $connection_upgrade {
-        default upgrade;
-        ""      close;
-    }
-
-    map $proxy_protocol_addr $proxy_forwarded_elem {
-        ~^[0-9.]+$        "for=$proxy_protocol_addr";
-        ~^[0-9A-Fa-f:.]+$ "for=\"[$proxy_protocol_addr]\"";
-        default           "for=unknown";
-    }
-
-    map $http_forwarded $proxy_add_forwarded {
-        "~^(,[ \t]*)*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?)*([ \t]*,([ \t]*([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?(;([!#$%&'*+.^_`|~0-9A-Za-z-]+=([!#$%&'*+.^_`|~0-9A-Za-z-]+|\"([\t \x21\x23-\x5B\x5D-\x7E\x80-\xFF]|\\\\[\t \x21-\x7E\x80-\xFF])*\"))?)*)?)*$" "$http_forwarded, $proxy_forwarded_elem";
-        default "$proxy_forwarded_elem";
-    }
-
-    server {
-        listen                     127.0.0.1:8001 ssl;
-
-        set_real_ip_from           127.0.0.1;
-        real_ip_header             proxy_protocol;
-
-        server_name                __DOMAIN__;
-
-        ssl_certificate            __CERT_PATH__;
-        ssl_certificate_key        __KEY_PATH__;
-
-        ssl_protocols              TLSv1.2 TLSv1.3;
-        ssl_ciphers                TLS13_AES_128_GCM_SHA256:TLS13_AES_256_GCM_SHA384:TLS13_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305;
-        ssl_prefer_server_ciphers  on;
-
-        ssl_stapling               on;
-        ssl_stapling_verify        on;
-        resolver                   1.1.1.1 valid=60s;
-        resolver_timeout           2s;
-
-        root  /var/www/html;
-        index index.html;
-
-        location / {
-            try_files $uri $uri/ =404;
-        }
-
-        location ~* \.(php|asp|aspx|jsp|cgi)$ {
-            return 404;
-        }
-    }
-}
-EOF
-
-    sed -i "s|__DOMAIN__|${domain}|g" /tmp/nginx.conf.template
-    sed -i "s|__CERT_PATH__|${cert_path}|g" /tmp/nginx.conf.template
-    sed -i "s|__KEY_PATH__|${key_path}|g" /tmp/nginx.conf.template
-
-    mv /tmp/nginx.conf.template /etc/nginx/nginx.conf
-    log_info "nginx.conf 写入完成"
-
-    if nginx -t 2>/dev/null; then
-        systemctl reload nginx 2>/dev/null || systemctl restart nginx 2>/dev/null || true
-        log_success "Nginx REALITY 回落配置已写入并重载"
-    else
-        log_warn "Nginx 配置语法有误，详细原因："
-        nginx -t
-    fi
+    log_success "public_key 已保存至 $_reality_meta"
 }
 
 build_vmess_tcp() {
@@ -2977,7 +2686,352 @@ build_naive() {
 EOF
 }
 
-configure_proxy_nodes() {
+# ----------------- Xray Templates -----------------
+build_xray_config() {
+    local type_id="$1"
+    local port=443
+    local uuid dest sni pbk pk sid path
+
+    uuid="${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
+    dest="www.icloud.com:443"
+    sni="www.icloud.com"
+    sid="${OLD_VLESS_REALITY_SID:-$(gen_short_id)}"
+    path="/$(openssl rand -hex 4)"
+
+    log_info "正在生成 Xray REALITY / xhttp 密钥对..."
+    if is_cmd_exist xray; then
+        local keys
+        keys=$(xray x25519)
+        pk=$(echo "$keys" | grep "Private key" | awk '{print $3}')
+        pbk=$(echo "$keys" | grep "Public key" | awk '{print $3}')
+    else
+        log_warn "未检测到 Xray，使用默认高强度备用密钥"
+        pk="UDtGvAI67X2xLPL50IC4DI15mZcaZqofAkE3saxvQ1w"
+        pbk="nE05JWUkmSpBxY5fY_YRhiQU4AvQhjmKGqE-oDDyGTA"
+    fi
+
+    mkdir -p /usr/local/etc/xray 2>/dev/null || true
+    echo "${port}:${pbk}" > /usr/local/etc/xray/reality_pub.conf
+
+    echo ""
+    echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
+    echo -e "  ${BOLD}${CYAN}    ${pbk}${NC}"
+    echo ""
+
+    if [[ "$type_id" == "4" ]]; then
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "tag": "dokodemo-in",
+            "port": $port,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": "127.0.0.1",
+                "port": 8444,
+                "network": "tcp"
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["tls"],
+                "routeOnly": true
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 8444,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid",
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "dest": "$dest",
+                    "serverNames": ["$sni"],
+                    "privateKey": "$pk",
+                    "shortIds": ["", "$sid"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"],
+                "routeOnly": true
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ],
+    "routing": {
+        "rules": [
+            {
+                "inboundTag": ["dokodemo-in"],
+                "domain": ["$sni"],
+                "outboundTag": "direct"
+            },
+            {
+                "inboundTag": ["dokodemo-in"],
+                "outboundTag": "block"
+            }
+        ]
+    }
+}
+EOF
+    elif [[ "$type_id" == "5" ]]; then
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+    "inbounds": [
+        {
+            "tag": "dokodemo-in",
+            "port": $port,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": "127.0.0.1",
+                "port": 8444,
+                "network": "tcp"
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["tls"],
+                "routeOnly": true
+            }
+        },
+        {
+            "listen": "127.0.0.1",
+            "port": 8444,
+            "protocol": "vless",
+            "settings": {
+                "clients": [
+                    {
+                        "id": "$uuid"
+                    }
+                ],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "reality",
+                "realitySettings": {
+                    "dest": "$dest",
+                    "serverNames": ["$sni"],
+                    "privateKey": "$pk",
+                    "shortIds": ["", "$sid"]
+                }
+            },
+            "sniffing": {
+                "enabled": true,
+                "destOverride": ["http", "tls", "quic"],
+                "routeOnly": true
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "tag": "direct"
+        },
+        {
+            "protocol": "blackhole",
+            "tag": "block"
+        }
+    ],
+    "routing": {
+        "rules": [
+            {
+                "inboundTag": ["dokodemo-in"],
+                "domain": ["$sni"],
+                "outboundTag": "direct"
+            },
+            {
+                "inboundTag": ["dokodemo-in"],
+                "outboundTag": "block"
+            }
+        ]
+    }
+}
+EOF
+    elif [[ "$type_id" == "6" ]]; then
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {
+        "loglevel": "warning"
+    },
+  "inbounds": [
+    {
+      "tag": "ab-xhttp-in",
+      "listen": "0.0.0.0",
+      "port": $port,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "flow": "",
+            "email": "ab-xhttp"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "$dest",
+          "serverNames": ["$sni"],
+          "privateKey": "$pk",
+          "shortIds": ["$sid"]
+        },
+        "xhttpSettings": {
+          "path": "$path",
+          "mode": "auto"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["ab-xhttp-in"],
+        "outboundTag": "direct"
+      }
+    ]
+  }
+}
+EOF
+    elif [[ "$type_id" == "7" ]]; then
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "dokodemo-in",
+      "port": $port,
+      "protocol": "dokodemo-door",
+      "settings": {
+        "address": "127.0.0.1",
+        "port": 8444,
+        "network": "tcp"
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["tls"],
+        "routeOnly": true
+      }
+    },
+    {
+      "tag": "ab-xhttp-in",
+      "listen": "127.0.0.1",
+      "port": 8444,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "flow": "",
+            "email": "ab-xhttp"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "$dest",
+          "serverNames": ["$sni"],
+          "privateKey": "$pk",
+          "shortIds": ["$sid"]
+        },
+        "xhttpSettings": {
+          "path": "$path",
+          "mode": "auto"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": ["dokodemo-in"],
+        "domain": ["$sni"],
+        "outboundTag": "direct"
+      },
+      {
+        "inboundTag": ["dokodemo-in"],
+        "outboundTag": "block"
+      },
+      {
+        "inboundTag": ["ab-xhttp-in"],
+        "outboundTag": "direct"
+      }
+    ]
+  }
+}
+EOF
+    fi
+
+    log_success "Xray 配置文件已写入: /usr/local/etc/xray/config.json"
+    echo ""
+
+    if is_cmd_exist xray; then
+        systemctl enable xray >/dev/null 2>&1 || true
+        systemctl restart xray >/dev/null 2>&1 || true
+        sleep 1
+        if systemctl is-active --quiet xray; then
+            log_success "Xray 已成功启动，并在后台保持运行！"
+        else
+            log_error "Xray 启动失败，请检查服务状态。"
+        fi
+    fi
+}
+
+configure_proxy() {
     if ! is_cmd_exist python3; then
         log_info "正在预装 python3 以支持节点解析..."
         if is_cmd_exist apt; then apt install -y python3 >/dev/null 2>&1;
@@ -2993,11 +3047,10 @@ configure_proxy_nodes() {
         echo -e "${BOLD}${CYAN}══ 四、配置代理节点 ══${NC}"
         echo ""
 
+        local import_choice=""
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
 
-        echo -e "是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）"
-        echo ""
         echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
         echo ""
         echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
@@ -3239,134 +3292,105 @@ PYEOF
         fi
         rm -f "$links_file"
 
-        echo -e "${CYAN}请选择要配置的代理核心:${NC}"
+        echo "请选择要配置的代理核心:"
         echo "  1) sing-box (支持多种协议、伪装与全能配置) [默认]"
         echo "  2) Xray-core (主打 Reality 防偷跑与 xhttp 协议)"
         echo ""
-        read -rp "请选择 (1-2, 默认 1): " CORE_CHOICE
-        CORE_CHOICE=${CORE_CHOICE:-1}
+        read -rp "请选择 (1-2, 默认 1): " core_choice
+        core_choice=${core_choice:-1}
+        
+        echo ""
 
-        if [[ "$CORE_CHOICE" == "2" ]]; then
+        if [[ "$core_choice" == "1" ]]; then
+            echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
             echo ""
-            echo -e "${CYAN}请选择要配置的 Xray 协议 (Xray 目前在此面板支持单选):${NC}"
+            echo "   1)  VLESS — TCP / XTLS-Vision"
+            echo "   2)  VLESS — WebSocket"
+            echo "   3)  VLESS — gRPC"
+            echo "   4)  VLESS — REALITY (sing-box 原版兼容)"
+            echo "   5)  VMess — TCP (TLS)"
+            echo "   6)  VMess — WebSocket (TLS)"
+            echo "   7)  Trojan — TCP (TLS)"
+            echo "   8)  Trojan — WebSocket (TLS)"
+            echo "   9)  Shadowsocks — 经典加密 (aes-256-gcm)"
+            echo "  10)  Shadowsocks 2022 — aes-256-gcm"
+            echo "  11)  Shadowsocks 2022 — aes-128-gcm"
+            echo "  12)  Hysteria2"
+            echo "  13)  TUIC v5"
+            echo "  14)  AnyTLS"
+            echo "  15)  NaïveProxy"
             echo ""
-            echo "   1)  VLESS — REALITY (防偷跑 + 有流控) [推荐]"
-            echo "   2)  VLESS — REALITY (防偷跑 + 无流控)"
-            echo "   3)  VLESS — xhttp (原版，无防偷跑套接)"
-            echo "   4)  VLESS — xhttp (防偷跑版)"
-            echo ""
+            echo -e "${GREEN} 100)  全部配置（逐一交互确认）${NC}"
+            echo -e "${GREEN} 101)  全部自动配置（按默认设置静默配置）${NC}"
             echo -e "${YELLOW}   0)  返回主菜单${NC}"
             echo ""
-            read -rp "请输入选项 (默认 0): " XRAY_CHOICE
-            XRAY_CHOICE=${XRAY_CHOICE:-0}
             
-            if [[ "$XRAY_CHOICE" == "0" ]]; then
+            read -rp "请输入选项（例如 1 4 12，默认 0）: " -a PROTO_CHOICES
+
+            if [[ ${#PROTO_CHOICES[@]} -eq 0 || "${PROTO_CHOICES[0]}" == "0" ]]; then
                 return
-            elif [[ "$XRAY_CHOICE" -ge 1 && "$XRAY_CHOICE" -le 4 ]]; then
-                build_xray_reality "$XRAY_CHOICE"
-                press_enter
-                break
-            else
-                log_warn "无效的选项"
+            fi
+
+            AUTO_DEFAULT=false
+            local has_101=false
+            local has_100=false
+            
+            for choice in "${PROTO_CHOICES[@]}"; do
+                if [[ "$choice" == "101" ]]; then has_101=true; fi
+                if [[ "$choice" == "100" ]]; then has_100=true; fi
+            done
+
+            if [[ "$has_101" == "true" ]]; then
+                PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+                AUTO_DEFAULT=true
+                log_info "已选择全部自动配置，将使用提取或默认参数静默生成所有节点..."
                 sleep 1
-                continue
-            fi
-        fi
-
-        echo ""
-        echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
-        echo ""
-        echo "   1)  VLESS — TCP / XTLS-Vision"
-        echo "   2)  VLESS — WebSocket"
-        echo "   3)  VLESS — gRPC"
-        echo "   4)  VLESS — REALITY (sing-box 原版兼容)"
-        echo "   5)  VMess — TCP (TLS)"
-        echo "   6)  VMess — WebSocket (TLS)"
-        echo "   7)  Trojan — TCP (TLS)"
-        echo "   8)  Trojan — WebSocket (TLS)"
-        echo "   9)  Shadowsocks — 经典加密 (aes-256-gcm)"
-        echo "  10)  Shadowsocks 2022 — aes-256-gcm"
-        echo "  11)  Shadowsocks 2022 — aes-128-gcm"
-        echo "  12)  Hysteria2"
-        echo "  13)  TUIC v5"
-        echo "  14)  AnyTLS"
-        echo "  15)  NaïveProxy"
-        echo ""
-        echo -e "${GREEN}  16)  全部配置（逐一交互确认）${NC}"
-        echo -e "${GREEN}  17)  全部自动配置（按默认设置静默配置）${NC}"
-        echo -e "${YELLOW}   0)  返回主菜单${NC}"
-        echo ""
-        
-        read -rp "请输入选项（例如 1 4 12，默认 0）: " -a PROTO_CHOICES
-
-        if [[ ${#PROTO_CHOICES[@]} -eq 0 ]]; then
-            PROTO_CHOICES=("0")
-        fi
-
-        if [[ "${PROTO_CHOICES[0]}" == "0" ]]; then
-            return
-        fi
-
-        AUTO_DEFAULT=false
-        local has_17=false
-        local has_16=false
-        
-        for choice in "${PROTO_CHOICES[@]}"; do
-            if [[ "$choice" == "17" ]]; then has_17=true; fi
-            if [[ "$choice" == "16" ]]; then has_16=true; fi
-        done
-
-        if [[ "$has_17" == "true" ]]; then
-            PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
-            AUTO_DEFAULT=true
-            log_info "已选择全部自动配置，将使用提取或默认参数静默生成所有节点..."
-            sleep 1
-        elif [[ "$has_16" == "true" ]]; then
-            PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
-            log_info "已选择全部配置，即将逐一进行交互确认..."
-            sleep 1
-        else
-            log_info "已选择 ${#PROTO_CHOICES[@]} 个协议，开始逐一配置..."
-        fi
-
-        local TMP_JSON
-        TMP_JSON=$(mktemp /tmp/vpsge_inbound_XXXXXX)
-        local INBOUNDS_JSON=""
-        local first=true
-
-        for choice in "${PROTO_CHOICES[@]}"; do
-            > "$TMP_JSON"
-            case $choice in
-                1)  build_vless_tcp     "$TMP_JSON" ;;
-                2)  build_vless_ws      "$TMP_JSON" ;;
-                3)  build_vless_grpc    "$TMP_JSON" ;;
-                4)  build_vless_reality_singbox "$TMP_JSON" ;;
-                5)  build_vmess_tcp     "$TMP_JSON" ;;
-                6)  build_vmess_ws      "$TMP_JSON" ;;
-                7)  build_trojan_tcp    "$TMP_JSON" ;;
-                8)  build_trojan_ws     "$TMP_JSON" ;;
-                9)  build_ss_classic    "$TMP_JSON" ;;
-                10) build_ss2022_256    "$TMP_JSON" ;;
-                11) build_ss2022_128    "$TMP_JSON" ;;
-                12) build_hysteria2     "$TMP_JSON" ;;
-                13) build_tuic          "$TMP_JSON" ;;
-                14) build_anytls        "$TMP_JSON" ;;
-                15) build_naive         "$TMP_JSON" ;;
-                *)  log_warn "未知选项: $choice，跳过"; continue ;;
-            esac
-            local inbound_json
-            inbound_json=$(cat "$TMP_JSON")
-            [[ -z "$inbound_json" ]] && continue
-            if $first; then
-                INBOUNDS_JSON="$inbound_json"
-                first=false
+            elif [[ "$has_100" == "true" ]]; then
+                PROTO_CHOICES=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+                log_info "已选择全部配置，即将逐一进行交互确认..."
+                sleep 1
             else
-                INBOUNDS_JSON="${INBOUNDS_JSON},${inbound_json}"
+                log_info "已选择 ${#PROTO_CHOICES[@]} 个协议，开始逐一配置..."
             fi
-        done
-        rm -f "$TMP_JSON"
 
-        cat > /etc/sing-box/config.json << EOF
+            local TMP_JSON
+            TMP_JSON=$(mktemp /tmp/vpsge_inbound_XXXXXX)
+            local INBOUNDS_JSON=""
+            local first=true
+
+            for choice in "${PROTO_CHOICES[@]}"; do
+                > "$TMP_JSON"
+                case $choice in
+                    1)  build_vless_tcp     "$TMP_JSON" ;;
+                    2)  build_vless_ws      "$TMP_JSON" ;;
+                    3)  build_vless_grpc    "$TMP_JSON" ;;
+                    4)  build_vless_reality "$TMP_JSON" ;;
+                    5)  build_vmess_tcp     "$TMP_JSON" ;;
+                    6)  build_vmess_ws      "$TMP_JSON" ;;
+                    7)  build_trojan_tcp    "$TMP_JSON" ;;
+                    8)  build_trojan_ws     "$TMP_JSON" ;;
+                    9)  build_ss_classic    "$TMP_JSON" ;;
+                    10) build_ss2022_256    "$TMP_JSON" ;;
+                    11) build_ss2022_128    "$TMP_JSON" ;;
+                    12) build_hysteria2     "$TMP_JSON" ;;
+                    13) build_tuic          "$TMP_JSON" ;;
+                    14) build_anytls        "$TMP_JSON" ;;
+                    15) build_naive         "$TMP_JSON" ;;
+                    *)  log_warn "未知选项: $choice，跳过"; continue ;;
+                esac
+                local inbound_json
+                inbound_json=$(cat "$TMP_JSON")
+                [[ -z "$inbound_json" ]] && continue
+                if $first; then
+                    INBOUNDS_JSON="$inbound_json"
+                    first=false
+                else
+                    INBOUNDS_JSON="${INBOUNDS_JSON},${inbound_json}"
+                fi
+            done
+            rm -f "$TMP_JSON"
+
+            cat > /etc/sing-box/config.json << EOF
 {
   "log": {
     "level": "info",
@@ -3385,38 +3409,83 @@ $INBOUNDS_JSON
 }
 EOF
 
-        log_success "配置文件已写入: /etc/sing-box/config.json"
-        echo ""
+            log_success "配置文件已写入: /etc/sing-box/config.json"
+            echo ""
 
-        if is_cmd_exist sing-box; then
-            local _check_out
-            _check_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1)
-            local _check_rc=$?
-            local _real_errors=""
-            
-            if [[ $_check_rc -eq 0 ]]; then
-                log_success "配置语法验证通过"
-            else
-                _real_errors=$(echo "$_check_out" | grep -v "legacy DNS\|ENABLE_DEPRECATED" || true)
-                if [[ -z "$_real_errors" ]]; then
+            if is_cmd_exist sing-box; then
+                local _check_out
+                _check_out=$(ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true sing-box check -c /etc/sing-box/config.json 2>&1)
+                local _check_rc=$?
+                local _real_errors=""
+                
+                if [[ $_check_rc -eq 0 ]]; then
                     log_success "配置语法验证通过"
                 else
-                    log_error "配置语法验证失败，详细原因："
-                    echo "$_real_errors"
+                    _real_errors=$(echo "$_check_out" | grep -v "legacy DNS\|ENABLE_DEPRECATED" || true)
+                    if [[ -z "$_real_errors" ]]; then
+                        log_success "配置语法验证通过"
+                    else
+                        log_error "配置语法验证失败，详细原因："
+                        echo "$_real_errors"
+                    fi
+                fi
+
+                if [[ $_check_rc -eq 0 ]] || [[ -z "$_real_errors" ]]; then
+                    log_info "正在自动启动 sing-box 并加入系统守护进程..."
+                    systemctl enable sing-box >/dev/null 2>&1 || true
+                    systemctl restart sing-box >/dev/null 2>&1 || true
+                    sleep 1
+                    if systemctl is-active --quiet sing-box; then
+                        log_success "sing-box 已成功启动，并在后台保持运行！"
+                    else
+                        log_error "sing-box 启动失败，可能存在端口冲突，请前往「5. 服务管理」查看实时日志。"
+                    fi
                 fi
             fi
 
-            if [[ $_check_rc -eq 0 ]] || [[ -z "$_real_errors" ]]; then
-                log_info "正在自动启动 sing-box 并加入系统守护进程..."
-                systemctl enable sing-box >/dev/null 2>&1 || true
-                systemctl restart sing-box >/dev/null 2>&1 || true
-                sleep 1
-                if systemctl is-active --quiet sing-box; then
-                    log_success "sing-box 已成功启动，并在后台保持运行！"
-                else
-                    log_error "sing-box 启动失败，可能存在端口冲突，请前往「5. 服务管理」查看实时日志。"
-                fi
+        elif [[ "$core_choice" == "2" ]]; then
+            echo "请选择要配置的 Xray 协议 (Xray 目前在此面板支持单选):"
+            echo ""
+            echo "   1)  VLESS — TCP / XTLS-Vision"
+            echo "   2)  VLESS — WebSocket"
+            echo "   3)  VLESS — gRPC"
+            echo "   4)  VLESS — REALITY (防偷跑 + 有流控) [推荐]"
+            echo "   5)  VLESS — REALITY (防偷跑 + 无流控)"
+            echo "   6)  VLESS — xhttp (原版，无防偷跑套接)"
+            echo "   7)  VLESS — xhttp (防偷跑版)"
+            echo "   8)  VMess — TCP (TLS)"
+            echo "   9)  VMess — WebSocket (TLS)"
+            echo "  10)  Trojan — TCP (TLS)"
+            echo "  11)  Trojan — WebSocket (TLS)"
+            echo "  12)  Shadowsocks — 经典加密 (aes-256-gcm)"
+            echo "  13)  Shadowsocks 2022 — aes-256-gcm"
+            echo "  14)  Shadowsocks 2022 — aes-128-gcm"
+            echo "  15)  Hysteria2"
+            echo ""
+            echo -e "${GREEN} 100)  全部配置（逐一交互确认）${NC}"
+            echo -e "${GREEN} 101)  全部自动配置（按默认设置静默配置）${NC}"
+            echo -e "${YELLOW}   0)  返回主菜单${NC}"
+            echo ""
+            
+            read -rp "请输入选项 (例如 1 4 12，默认 0): " -a XRAY_CHOICES
+            
+            if [[ ${#XRAY_CHOICES[@]} -eq 0 || "${XRAY_CHOICES[0]}" == "0" ]]; then
+                return
             fi
+
+            local x_choice="${XRAY_CHOICES[0]}"
+            if [[ "$x_choice" == "100" || "$x_choice" == "101" ]]; then
+                log_info "选择全部配置，Xray由于端口结构，将自动为您应用最强推荐配置 (4: VLESS REALITY 防偷跑+流控)..."
+                x_choice=4
+            fi
+
+            case $x_choice in
+                4) build_xray_config "4" ;;
+                5) build_xray_config "5" ;;
+                6) build_xray_config "6" ;;
+                7) build_xray_config "7" ;;
+                *) log_warn "当前一键面板中 Xray 主要专精于 Reality 防偷跑与 xhttp (选项 4-7)。选项 $x_choice 暂不直接生成，请选择 4-7 或使用 sing-box 核心配置其他协议。"; sleep 2 ;;
+            esac
         fi
 
         press_enter
@@ -3603,41 +3672,27 @@ menu_manage_xray() {
         opt=${opt:-0}
         case $opt in
             1) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl start xray && log_success "Xray 已启动"
-                else log_error "未安装 Xray"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl start xray && log_success "Xray 已启动"; else log_error "未安装 Xray"; fi
                 press_enter ;;
             2) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl stop xray && log_success "Xray 已停止"
-                else log_error "未安装 Xray"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl stop xray && log_success "Xray 已停止"; else log_error "未安装 Xray"; fi
                 press_enter ;;
             3)
                 if [[ "$is_installed" == "true" ]]; then
-                    systemctl restart xray
-                    echo ""
-                    systemctl status xray --no-pager || true
+                    systemctl restart xray; echo ""; systemctl status xray --no-pager || true
                 else log_error "未安装 Xray"; fi
                 press_enter ;;
             4) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl status xray --no-pager || true
-                else log_error "未安装 Xray"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl status xray --no-pager || true; else log_error "未安装 Xray"; fi
                 press_enter ;;
             5) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl enable xray && log_success "已设为开机自启"
-                else log_error "未安装 Xray"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl enable xray && log_success "已设为开机自启"; else log_error "未安装 Xray"; fi
                 press_enter ;;
             6) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl disable xray && log_success "已取消开机自启"
-                else log_error "未安装 Xray"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl disable xray && log_success "已取消开机自启"; else log_error "未安装 Xray"; fi
                 press_enter ;;
             7) 
-                if [[ "$is_installed" == "true" ]]; then
-                    journalctl -u xray -f --no-pager
-                else log_error "未安装 Xray"; press_enter; fi
+                if [[ "$is_installed" == "true" ]]; then journalctl -u xray -f --no-pager; else log_error "未安装 Xray"; press_enter; fi
                 ;;
             8) uninstall_xray; press_enter ;;
             0) return ;;
@@ -3683,40 +3738,22 @@ menu_manage_nginx() {
         opt=${opt:-0}
         case $opt in
             1) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl start nginx && log_success "Nginx 已启动"
-                else log_error "Nginx 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl start nginx && log_success "Nginx 已启动"; else log_error "Nginx 未安装"; fi
                 press_enter ;;
             2) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl stop nginx && log_success "Nginx 已停止"
-                else log_error "Nginx 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl stop nginx && log_success "Nginx 已停止"; else log_error "Nginx 未安装"; fi
                 press_enter ;;
             3)
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl restart nginx
-                    echo ""
-                    systemctl status nginx --no-pager || true
-                else
-                    log_error "Nginx 未安装"
-                fi
+                if [[ "$is_installed" == "true" ]]; then systemctl restart nginx; echo ""; systemctl status nginx --no-pager || true; else log_error "Nginx 未安装"; fi
                 press_enter ;;
             4)
-                if [[ "$is_installed" == "true" ]]; then
-                    nginx -t && log_success "Nginx 配置验证通过" || log_error "Nginx 配置有误"
-                else
-                    log_error "Nginx 未安装"
-                fi
+                if [[ "$is_installed" == "true" ]]; then nginx -t && log_success "Nginx 配置验证通过" || log_error "Nginx 配置有误"; else log_error "Nginx 未安装"; fi
                 press_enter ;;
             5) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl enable nginx && log_success "Nginx 已设为开机自启"
-                else log_error "Nginx 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl enable nginx && log_success "Nginx 已设为开机自启"; else log_error "Nginx 未安装"; fi
                 press_enter ;;
             6) 
-                if [[ -f /var/log/nginx/error.log ]]; then
-                    tail -f /var/log/nginx/error.log
-                else log_error "日志文件不存在或 Nginx 未安装"; press_enter; fi
+                if [[ -f /var/log/nginx/error.log ]]; then tail -f /var/log/nginx/error.log; else log_error "日志文件不存在或 Nginx 未安装"; press_enter; fi
                 ;;
             7) uninstall_nginx; press_enter ;;
             0) return ;;
@@ -3759,24 +3796,16 @@ menu_manage_docker() {
         opt=${opt:-0}
         case $opt in
             1) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl start docker && log_success "Docker 已启动"
-                else log_error "Docker 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl start docker && log_success "Docker 已启动"; else log_error "Docker 未安装"; fi
                 press_enter ;;
             2) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl stop docker && log_success "Docker 已停止"
-                else log_error "Docker 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl stop docker && log_success "Docker 已停止"; else log_error "Docker 未安装"; fi
                 press_enter ;;
             3) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl restart docker && log_success "Docker 已重启"
-                else log_error "Docker 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl restart docker && log_success "Docker 已重启"; else log_error "Docker 未安装"; fi
                 press_enter ;;
             4) 
-                if [[ "$is_installed" == "true" ]]; then
-                    systemctl status docker --no-pager || true
-                else log_error "Docker 未安装"; fi
+                if [[ "$is_installed" == "true" ]]; then systemctl status docker --no-pager || true; else log_error "Docker 未安装"; fi
                 press_enter ;;
             5) uninstall_docker; press_enter ;;
             0) return ;;
@@ -3920,12 +3949,12 @@ menu_service() {
         echo -e "${BOLD}${CYAN}══ 五、服务管理 ══${NC}"
         echo ""
         echo "  1) 管理 sing-box"
-        echo "  2) 管理 Nginx"
-        echo "  3) 管理 Docker"
-        echo "  4) 管理 Sub-Store"
-        echo "  5) 管理 Wallos"
-        echo "  6) 管理 Realm (端口转发)"
-        echo "  7) 管理 Xray"
+        echo "  2) 管理 Xray"
+        echo "  3) 管理 Nginx"
+        echo "  4) 管理 Docker"
+        echo "  5) 管理 Sub-Store"
+        echo "  6) 管理 Wallos"
+        echo "  7) 管理 Realm (端口转发)"
         echo ""
         echo " 100) 更新脚本"
         echo ""
@@ -3935,12 +3964,12 @@ menu_service() {
         opt=${opt:-0}
         case $opt in
             1) menu_manage_singbox ;;
-            2) menu_manage_nginx ;;
-            3) menu_manage_docker ;;
-            4) menu_manage_substore ;;
-            5) menu_manage_wallos ;;
-            6) menu_manage_realm ;;
-            7) menu_manage_xray ;;
+            2) menu_manage_xray ;;
+            3) menu_manage_nginx ;;
+            4) menu_manage_docker ;;
+            5) menu_manage_substore ;;
+            6) menu_manage_wallos ;;
+            7) menu_manage_realm ;;
             100) update_script ;;
             0) return ;;
             *) log_warn "无效选择" ;;
@@ -4047,43 +4076,54 @@ generate_links() {
     echo ""
 
     python3 << PYEOF
-import json, base64, sys, re, urllib.parse, os
+import json, base64, sys, re, os, urllib.parse
 
 SERVER_IP   = "$SERVER_IP"
-CONFIG_FILE = "/etc/sing-box/config.json"
-XRAY_CONFIG = "/usr/local/etc/xray/config.json"
-OUTPUT_FILE = "/etc/sing-box/subscription.txt"
-B64_FILE    = "/etc/sing-box/subscription.b64"
-CLASH_FILE  = "/etc/sing-box/clash.yaml"
+OUTPUT_FILE = "/etc/vpsge_subscription.txt"
+B64_FILE    = "/etc/vpsge_subscription.b64"
+CLASH_FILE  = "/etc/vpsge_clash.yaml"
 
 def urlencode(s):
     return urllib.parse.quote(str(s), safe='')
 
-def strip_comments(text):
-    return re.sub(r'(?<![:/])//[^\n]*', '', text)
+def b64(s):
+    return base64.urlsafe_b64encode(s.encode()).decode().rstrip('=')
 
 def get_sni(tls, addr):
     if isinstance(tls, dict):
         return tls.get('server_name') or addr
     return addr
 
-singbox_links = []
-xray_links = []
+def strip_comments(text):
+    return re.sub(r'(?<![:/])//[^\n]*', '', text)
+
+def is_ip(s):
+    import re
+    return bool(re.match(r'^[\d.]+$', s) or re.match(r'^[0-9a-fA-F:]+$', s))
+
+links_sb = []
+links_xray = []
 clash_proxies = []
 clash_proxy_names = []
 
-# --- 1. 解析 sing-box 配置 ---
-if os.path.exists(CONFIG_FILE):
+# ================= Sing-box 解析 =================
+CONFIG_FILE_SB = "/etc/sing-box/config.json"
+if os.path.exists(CONFIG_FILE_SB):
     try:
-        with open(CONFIG_FILE) as f:
+        with open(CONFIG_FILE_SB) as f:
             raw = f.read()
-        config = json.loads(strip_comments(raw))
+        try:
+            config = json.loads(raw)
+        except:
+            config = json.loads(strip_comments(raw))
+        
         inbounds = config.get('inbounds', [])
         for ib in inbounds:
             t    = ib.get('type', '')
             tag  = ib.get('tag', t)
             port = ib.get('listen_port')
-            if not port: continue
+            if not port:
+                continue
 
             listen = ib.get('listen', '::')
             addr = SERVER_IP if listen in ('::', '0.0.0.0') else listen
@@ -4092,9 +4132,6 @@ if os.path.exists(CONFIG_FILE):
             tls_on = tls.get('enabled', False)
             sni = get_sni(tls, addr)
 
-            def is_ip(s):
-                import re
-                return bool(re.match(r'^[\d.]+$', s) or re.match(r'^[0-9a-fA-F:]+$', s))
             if tls_on and sni and not is_ip(sni):
                 addr = sni
 
@@ -4127,7 +4164,8 @@ if os.path.exists(CONFIG_FILE):
                                 if _line.startswith(f"{port}:"):
                                     pbk = _line.split(':', 1)[1]
                                     break
-                    except: pass
+                    except Exception:
+                        pass
                     sid_val = reality.get('short_id', [''])
                     sid = sid_val[0] if isinstance(sid_val, list) else sid_val
                     params = f"encryption=none&flow={flow}&security=reality&sni={sni}&fp=chrome&pbk={urlencode(pbk)}&sid={sid}&type=tcp&headerType=none"
@@ -4140,13 +4178,14 @@ if os.path.exists(CONFIG_FILE):
                         params += f"&path={urlencode(ws_path)}"
                     if net == 'grpc':
                         svc = ib.get('transport', {}).get('service_name', '')
-                        if svc: params += f"&serviceName={urlencode(svc)}"
+                        if svc:
+                            params += f"&serviceName={urlencode(svc)}"
 
-                link = f"vless://{uuid}@{SERVER_IP}:{port}?{params}#{tag_enc}"
-                singbox_links.append(link)
+                link = f"vless://{uuid}@{addr}:{port}?{params}#{tag_enc}"
+                links_sb.append(link)
 
                 cp = {
-                    'name': display_tag, 'type': 'vless', 'server': SERVER_IP, 'port': port,
+                    'name': display_tag, 'type': 'vless', 'server': addr, 'port': port,
                     'uuid': uuid, 'tls': tls_on, 'servername': sni,
                     'network': net, 'udp': True
                 }
@@ -4168,16 +4207,16 @@ if os.path.exists(CONFIG_FILE):
                 tag_enc = urlencode(tag)
 
                 obj = {
-                    'v':'2','ps':tag,'add':SERVER_IP,'port':str(port),
+                    'v':'2','ps':tag,'add':addr,'port':str(port),
                     'id':uuid,'aid':str(aid),'scy':'auto',
                     'net':net,'type':'none','host':sni,
                     'path':ws_path,'tls':tls_s,'sni':sni,'fp':'chrome'
                 }
                 enc = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip('=')
-                singbox_links.append(f"vmess://{enc}")
+                links_sb.append(f"vmess://{enc}")
 
                 cp = {
-                    'name': tag, 'type': 'vmess', 'server': SERVER_IP, 'port': port,
+                    'name': tag, 'type': 'vmess', 'server': addr, 'port': port,
                     'uuid': uuid, 'alterId': aid, 'cipher': 'auto',
                     'tls': tls_on, 'servername': sni, 'network': net, 'udp': True
                 }
@@ -4191,14 +4230,16 @@ if os.path.exists(CONFIG_FILE):
                 pwd = users[0].get('password', '')
                 tag_enc = urlencode(tag)
                 params = f"security=tls&sni={sni}&type={net}"
-                if net == 'ws': params += f"&path={urlencode(ws_path)}"
-                singbox_links.append(f"trojan://{urlencode(pwd)}@{SERVER_IP}:{port}?{params}#{tag_enc}")
+                if net == 'ws':
+                    params += f"&path={urlencode(ws_path)}"
+                links_sb.append(f"trojan://{urlencode(pwd)}@{addr}:{port}?{params}#{tag_enc}")
 
                 cp = {
-                    'name': tag, 'type': 'trojan', 'server': SERVER_IP, 'port': port,
+                    'name': tag, 'type': 'trojan', 'server': addr, 'port': port,
                     'password': pwd, 'sni': sni, 'udp': True, 'network': net
                 }
-                if net == 'ws': cp['ws-opts'] = {'path': ws_path, 'headers': {'Host': sni}}
+                if net == 'ws':
+                    cp['ws-opts'] = {'path': ws_path, 'headers': {'Host': sni}}
                 clash_proxies.append(cp)
                 clash_proxy_names.append(tag)
 
@@ -4209,18 +4250,23 @@ if os.path.exists(CONFIG_FILE):
                 if not method or not server_pwd: continue
 
                 if method.startswith('2022-'):
-                    user_pwd = users[0].get('password', '') if users else ''
-                    raw = f"{method}:{server_pwd}:{user_pwd}" if user_pwd else f"{method}:{server_pwd}"
+                    user_pwd = ''
+                    if users:
+                        user_pwd = users[0].get('password', '')
+                    if user_pwd:
+                        raw = f"{method}:{server_pwd}:{user_pwd}"
+                    else:
+                        raw = f"{method}:{server_pwd}"
                     info = base64.urlsafe_b64encode(raw.encode()).decode().rstrip('=')
                     clash_pwd = f"{server_pwd}:{user_pwd}" if user_pwd else server_pwd
                 else:
                     info = base64.urlsafe_b64encode(f"{method}:{server_pwd}".encode()).decode().rstrip('=')
                     clash_pwd = server_pwd
 
-                singbox_links.append(f"ss://{info}@{SERVER_IP}:{port}#{tag_enc}")
+                links_sb.append(f"ss://{info}@{addr}:{port}#{tag_enc}")
 
                 cp = {
-                    'name': tag, 'type': 'ss', 'server': SERVER_IP, 'port': port,
+                    'name': tag, 'type': 'ss', 'server': addr, 'port': port,
                     'cipher': method, 'password': clash_pwd, 'udp': True
                 }
                 clash_proxies.append(cp)
@@ -4236,17 +4282,21 @@ if os.path.exists(CONFIG_FILE):
                 obfs_type = obfs_conf.get('type', '')
                 obfs_pwd  = obfs_conf.get('password', '')
                 params = f"sni={sni}&insecure=0&allowInsecure=0&upmbps={up_m}&downmbps={dn_m}"
-                if obfs_type: params += f"&obfs={obfs_type}"
-                if obfs_pwd: params += f"&obfs-password={urlencode(obfs_pwd)}"
-                singbox_links.append(f"hysteria2://{pwd}@{SERVER_IP}:{port}?{params}#{tag_enc}")
+                if obfs_type:
+                    params += f"&obfs={obfs_type}"
+                if obfs_pwd:
+                    params += f"&obfs-password={urlencode(obfs_pwd)}"
+                links_sb.append(f"hysteria2://{pwd}@{addr}:{port}?{params}#{tag_enc}")
 
                 cp = {
-                    'name': tag, 'type': 'hysteria2', 'server': SERVER_IP, 'port': port,
+                    'name': tag, 'type': 'hysteria2', 'server': addr, 'port': port,
                     'password': pwd, 'sni': sni, 'up': f"{up_m} Mbps", 'down': f"{dn_m} Mbps",
                     'skip-cert-verify': False
                 }
-                if obfs_type: cp['obfs'] = obfs_type
-                if obfs_pwd: cp['obfs-password'] = obfs_pwd
+                if obfs_type:
+                    cp['obfs'] = obfs_type
+                if obfs_pwd:
+                    cp['obfs-password'] = obfs_pwd
                 clash_proxies.append(cp)
                 clash_proxy_names.append(tag)
 
@@ -4258,10 +4308,10 @@ if os.path.exists(CONFIG_FILE):
                 tag_enc = urlencode(tag)
                 cc   = ib.get('congestion_control', 'bbr')
                 params = f"sni={sni}&congestion_control={cc}&alpn=h3&udp_relay_mode=native"
-                singbox_links.append(f"tuic://{uuid}:{urlencode(pwd)}@{SERVER_IP}:{port}?{params}#{tag_enc}")
+                links_sb.append(f"tuic://{uuid}:{urlencode(pwd)}@{addr}:{port}?{params}#{tag_enc}")
 
                 cp = {
-                    'name': tag, 'type': 'tuic', 'server': SERVER_IP, 'port': port,
+                    'name': tag, 'type': 'tuic', 'server': addr, 'port': port,
                     'uuid': uuid, 'password': pwd, 'alpn': ['h3'],
                     'congestion-controller': cc, 'sni': sni, 'udp-relay-mode': 'native'
                 }
@@ -4273,7 +4323,7 @@ if os.path.exists(CONFIG_FILE):
                 pwd    = users[0].get('password', '')
                 tag_enc = urlencode(tag)
                 params = f"security=tls&sni={sni}&insecure=0&allowInsecure=0&type=tcp"
-                singbox_links.append(f"anytls://{pwd}@{SERVER_IP}:{port}?{params}#{tag_enc}")
+                links_sb.append(f"anytls://{pwd}@{addr}:{port}?{params}#{tag_enc}")
 
             elif t == 'naive':
                 if not users: continue
@@ -4281,82 +4331,95 @@ if os.path.exists(CONFIG_FILE):
                 uname = u.get('username', '')
                 pwd   = u.get('password', '')
                 tag_enc = urlencode(tag)
-                singbox_links.append(f"naive+https://{urlencode(uname)}:{urlencode(pwd)}@{SERVER_IP}:{port}?padding=true#{tag_enc}")
+                links_sb.append(f"naive+https://{urlencode(uname)}:{urlencode(pwd)}@{addr}:{port}?padding=true#{tag_enc}")
     except Exception as e:
-        print(f"[WARN] Sing-box config parsing failed: {e}")
+        pass
 
-# --- 2. 解析 Xray 配置 ---
-if os.path.exists(XRAY_CONFIG):
+# ================= Xray 解析 =================
+CONFIG_FILE_XR = "/usr/local/etc/xray/config.json"
+if os.path.exists(CONFIG_FILE_XR):
     try:
-        with open(XRAY_CONFIG) as f:
-            x_raw = f.read()
-        x_config = json.loads(strip_comments(x_raw))
-        x_inbounds = x_config.get("inbounds", [])
-
-        x_pbk = ""
-        try:
-            with open("/usr/local/etc/xray/reality_pub.key") as f:
-                x_pbk = f.read().strip()
-        except:
-            pass
-
-        dokodemo_map = {}
-        for ib in x_inbounds:
+        with open(CONFIG_FILE_XR) as fx:
+            xr_raw = strip_comments(fx.read())
+            xr_conf = json.loads(xr_raw)
+        
+        ext_port = 443
+        int_port = 8444
+        for ib in xr_conf.get("inbounds", []):
             if ib.get("protocol") == "dokodemo-door":
-                ext_port = ib.get("port")
-                int_port = ib.get("settings", {}).get("port")
-                if int_port:
-                    dokodemo_map[int_port] = ext_port
+                ext_port = ib.get("port", 443)
+                int_port = ib.get("settings", {}).get("port", 8444)
 
-        for ib in x_inbounds:
-            if ib.get("protocol") == "vless" and ib.get("streamSettings", {}).get("security") == "reality":
-                u = ib.get("settings", {}).get("clients", [{}])[0]
-                uuid = u.get("id", "")
-                flow = u.get("flow", "")
-
-                int_port = ib.get("port")
-                ext_port = dokodemo_map.get(int_port, int_port)
-
+        for ib in xr_conf.get("inbounds", []):
+            if ib.get("protocol") == "vless":
+                clients = ib.get("settings", {}).get("clients", [])
+                if not clients: continue
+                uuid = clients[0].get("id", "")
+                flow = clients[0].get("flow", "")
+                email = clients[0].get("email", "xray-vless")
+                
+                display_tag = ib.get("tag", email)
+                
                 stream = ib.get("streamSettings", {})
                 net = stream.get("network", "tcp")
-                reality = stream.get("realitySettings", {})
-                sni_list = reality.get("serverNames", [])
-                sni = sni_list[0] if sni_list else ""
-                sid_list = reality.get("shortIds", [])
-                sid = sid_list[0] if sid_list else ""
+                sec = stream.get("security", "none")
 
-                xhttp_path = stream.get("xhttpSettings", {}).get("path", "") if net == "xhttp" else ""
+                real = stream.get("realitySettings", {})
+                sni = real.get("serverNames", [""])[0]
+                sid = real.get("shortIds", [""])[0]
 
-                params = f"encryption=none"
+                path = ""
+                if net == "xhttp":
+                    path = stream.get("xhttpSettings", {}).get("path", "")
+
+                pbk = ""
+                try:
+                    with open("/usr/local/etc/xray/reality_pub.conf") as f:
+                        for line in f:
+                            if line.startswith(f"{ext_port}:"):
+                                pbk = line.strip().split(":", 1)[1]
+                except:
+                    pass
+
+                p_port = ext_port if (str(ib.get("port")) == str(int_port) or ib.get("listen") == "127.0.0.1") else ib.get("port", 443)
+                addr = sni if (sni and not is_ip(sni)) else SERVER_IP
+
+                params = f"encryption=none&security={sec}&sni={sni}&fp=chrome&type={net}&headerType=none"
                 if flow: params += f"&flow={flow}"
-                params += f"&security=reality&sni={sni}&fp=chrome&pbk={urlencode(x_pbk)}&sid={sid}&type={net}&headerType=none"
-                if net == "xhttp" and xhttp_path:
-                    params += f"&path={urlencode(xhttp_path)}"
+                if sec == "reality":
+                    params += f"&pbk={urlencode(pbk)}&sid={sid}"
+                if net == "xhttp":
+                    params += f"&path={urlencode(path)}"
 
-                tag = "Xray-Reality-xhttp" if net == "xhttp" else "Xray-Reality-TCP"
-
-                link = f"vless://{uuid}@{SERVER_IP}:{ext_port}?{params}#{urlencode(tag)}"
-                xray_links.append(link)
+                link = f"vless://{uuid}@{addr}:{p_port}?{params}#{urlencode(display_tag)}"
+                links_xray.append(link)
 
                 cp = {
-                    'name': tag, 'type': 'vless', 'server': SERVER_IP, 'port': ext_port,
-                    'uuid': uuid, 'tls': True, 'servername': sni,
-                    'network': net, 'udp': True,
-                    'reality-opts': {'public-key': x_pbk, 'short-id': sid}
+                    'name': display_tag, 'type': 'vless', 'server': addr, 'port': p_port,
+                    'uuid': uuid, 'tls': True if sec == "reality" else False, 'servername': sni,
+                    'network': net, 'udp': True
                 }
                 if flow: cp['flow'] = flow
-                if net == 'xhttp' and xhttp_path:
-                    cp['network'] = 'xhttp'
-                    cp['xhttp-opts'] = {'path': xhttp_path}
+                if sec == "reality":
+                    cp['reality-opts'] = {'public-key': pbk, 'short-id': sid}
+                if net == 'xhttp':
+                    cp['xhttp-opts'] = {'path': path}
                 clash_proxies.append(cp)
-                clash_proxy_names.append(tag)
-    except Exception as e:
-        print(f"[WARN] Xray config parsing failed: {e}")
+                clash_proxy_names.append(display_tag)
 
-all_links = singbox_links + xray_links
+    except Exception as e:
+        pass
+
+# ================= 写入与输出 =================
+all_links = links_sb + links_xray
 
 with open(OUTPUT_FILE, 'w') as f:
-    f.write('\n'.join(all_links) + '\n')
+    if links_sb:
+        f.write('--- sing-box ---\n')
+        f.write('\n'.join(links_sb) + '\n')
+    if links_xray:
+        f.write('--- Xray ---\n')
+        f.write('\n'.join(links_xray) + '\n')
 
 with open(B64_FILE, 'w') as f:
     f.write(base64.b64encode('\n'.join(all_links).encode()).decode() + '\n')
@@ -4378,7 +4441,6 @@ try:
     }
     with open(CLASH_FILE, 'w') as f:
         yaml.dump(clash_doc, f, allow_unicode=True, default_flow_style=False)
-    print(f"Clash/Mihomo 配置已写入: {CLASH_FILE}")
 except ImportError:
     with open(CLASH_FILE, 'w') as f:
         f.write("mixed-port: 7890\nallow-lan: false\nmode: rule\nlog-level: info\n\nproxies:\n")
@@ -4397,17 +4459,21 @@ except ImportError:
 
 print(f"\n[✓] 共生成 {len(all_links)} 条订阅链接")
 print(f"[✓] 明文订阅: {OUTPUT_FILE}")
-print(f"[✓] Base64订阅: {B64_FILE}")
+print(f"[✓] Base64订阅 (V2RayN): {B64_FILE}")
+print(f"[✓] Clash/Mihomo: {CLASH_FILE}")
 print("")
-if singbox_links:
-    print("══════════════ Sing-box 节点 ══════════════")
-    for lk in singbox_links:
+
+if links_sb:
+    print("══════════════ sing-box 节点 ══════════════")
+    for lk in links_sb:
         print(lk)
-if xray_links:
+if links_xray:
     print("════════════════ Xray 节点 ════════════════")
-    for lk in xray_links:
+    for lk in links_xray:
         print(lk)
-print("═══════════════════════════════════════════")
+if not links_sb and not links_xray:
+    print("未检测到任何有效的代理节点。")
+print("══════════════════════════════════════════")
 PYEOF
 }
 
@@ -4416,7 +4482,7 @@ menu_links() {
         clear
         echo -e "${BOLD}${CYAN}══ 六、生成节点链接 ══${NC}"
         echo ""
-        echo "  1) 生成所有节点链接（singbox / Xray / V2RayN / Clash Mihomo）"
+        echo "  1) 生成所有节点链接（singbox / V2RayN / Clash Mihomo）"
         echo "  2) 查看明文订阅"
         echo "  3) 查看 Base64 订阅（V2RayN 用）"
         echo "  4) 查看 Clash/Mihomo 配置"
@@ -4428,13 +4494,13 @@ menu_links() {
         opt=${opt:-0}
         case $opt in
             1) generate_links; press_enter ;;
-            2) cat /etc/sing-box/subscription.txt 2>/dev/null || log_warn "文件不存在，请先生成链接"; press_enter ;;
-            3) cat /etc/sing-box/subscription.b64 2>/dev/null || log_warn "文件不存在，请先生成链接"; press_enter ;;
-            4) cat /etc/sing-box/clash.yaml 2>/dev/null || log_warn "文件不存在，请先生成链接"; press_enter ;;
+            2) cat /etc/vpsge_subscription.txt 2>/dev/null || log_warn "文件不存在，请先生成链接"; press_enter ;;
+            3) cat /etc/vpsge_subscription.b64 2>/dev/null || log_warn "文件不存在，请先生成链接"; press_enter ;;
+            4) cat /etc/vpsge_clash.yaml 2>/dev/null || log_warn "文件不存在，请先生成链接"; press_enter ;;
             5)
-                echo "  明文订阅:       /etc/sing-box/subscription.txt"
-                echo "  Base64 订阅:    /etc/sing-box/subscription.b64"
-                echo "  Clash/Mihomo:   /etc/sing-box/clash.yaml"
+                echo "  明文订阅:       /etc/vpsge_subscription.txt"
+                echo "  Base64 订阅:    /etc/vpsge_subscription.b64"
+                echo "  Clash/Mihomo:   /etc/vpsge_clash.yaml"
                 press_enter ;;
             0) return ;;
             *) log_warn "无效选择" ;;
@@ -4452,10 +4518,9 @@ run_all() {
     echo "将依次执行："
     echo "  1. 基础安全设置（SSH/BBR/fail2ban）"
     echo "  2. SSL 证书申请"
-    echo "  3. 安装 sing-box"
+    echo "  3. 安装代理内核 (sing-box)"
     echo "  4. 配置代理节点"
-    echo "  5. 启动服务"
-    echo "  6. 生成节点链接"
+    echo "  5. 生成节点链接"
     echo ""
     read -rp "确认继续？(y/N): " c
     [[ "${c,,}" != "y" ]] && return
@@ -4477,26 +4542,16 @@ run_all() {
     deploy_ssl
 
     echo ""
-    echo -e "${BLUE}── 步骤 3：安装代理核心 ──${NC}"
+    echo -e "${BLUE}── 步骤 3：安装代理内核 ──${NC}"
     bash <(curl -fsSL https://sing-box.app/deb-install.sh) 2>/dev/null || true
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
 
     echo ""
     echo -e "${BLUE}── 步骤 4：配置代理节点 ──${NC}"
-    configure_proxy_nodes
+    configure_proxy
 
     echo ""
-    echo -e "${BLUE}── 步骤 5：启动服务 ──${NC}"
-    systemctl enable sing-box 2>/dev/null || true
-    systemctl restart sing-box 2>/dev/null || true
-    if systemctl is-active --quiet sing-box; then
-        log_success "sing-box 运行中"
-    else
-        log_warn "sing-box 未运行，可能是因为在第4步选择了配置Xray。如果使用Xray，Xray服务已启动。"
-    fi
-
-    echo ""
-    echo -e "${BLUE}── 步骤 6：生成节点链接 ──${NC}"
+    echo -e "${BLUE}── 步骤 5：生成节点链接 ──${NC}"
     generate_links
 
     press_enter
@@ -4510,12 +4565,12 @@ main_menu() {
         clear
         echo -e "${BOLD}${CYAN}"
         echo "╔══════════════════════════════════════════════════════╗"
-        echo "║          服务器一键管理脚本  ($SCRIPT_VERSION)             ║"
+        echo "║          服务器一键管理脚本  ($SCRIPT_VERSION)            ║"
         echo "╚══════════════════════════════════════════════════════╝"
         echo -e "${NC}"
         echo "  部署流程:"
         echo -e "   ${GREEN}1.${NC} 基础设置（SSH/fail2ban/BBR）       ${GREEN}2.${NC} SSL 证书申请与安装"
-        echo -e "   ${GREEN}3.${NC} 安装服务 (包含 Docker/拓展)        ${GREEN}4.${NC} 配置代理节点 (sing-box/Xray)"
+        echo -e "   ${GREEN}3.${NC} 安装服务 (包含 Docker/拓展)        ${GREEN}4.${NC} 配置代理节点 (sing-box / Xray)"
         echo -e "   ${GREEN}5.${NC} 服务管理 (启停/日志/面板维护)      ${GREEN}6.${NC} 生成节点订阅链接"
         echo ""
         echo -e "   ${YELLOW}7.${NC} ── 全部执行（1→6）──"
@@ -4528,7 +4583,7 @@ main_menu() {
             1) detect_distro; menu_basic ;;
             2) menu_ssl ;;
             3) detect_distro; menu_install_service ;;
-            4) configure_proxy_nodes ;;
+            4) configure_proxy ;;
             5) menu_service ;;
             6) menu_links ;;
             7) detect_distro; run_all ;;
@@ -4551,15 +4606,12 @@ main_menu() {
 install_self() {
     local target="/usr/bin/vpsge"
     
-    # 如果当前正在 /usr/bin/vpsge 执行，则无需安装
     [[ "$0" == "$target" ]] && return 0
 
-    # 判断是否为本地文件正常运行，若是则直接复制
     if [[ -f "$0" && "$0" != *"bash"* && "$0" != *"/dev/fd/"* ]]; then
         cp -f "$0" "$target"
         chmod 755 "$target"
     else
-        # 否则判定为通过 bash <(curl ...) 执行流，强制从直链拉取文件创建快捷命令
         curl -fsSL --connect-timeout 10 "$VPSGE_REMOTE_URL" -o "$target" 2>/dev/null || \
         wget -qO "$target" "$VPSGE_REMOTE_URL" 2>/dev/null
         
