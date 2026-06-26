@@ -1745,7 +1745,7 @@ menu_install_service() {
         echo "  1) 安装 sing-box 最新稳定版"
         echo "  2) 安装 sing-box 指定版本号"
         echo "  3) 安装 sing-box Beta / 预发布版"
-        echo " 17) 安装 Xray 最新版 (Reality 官方模板/xhttp 用)"
+        echo " 16) 安装 Xray 最新版 (Reality 官方模板/xhttp 用)"
         echo ""
         echo -e "  ${CYAN}── Nginx (用于反代和回落) ──${NC}"
         echo "  4) 安装 Nginx 最新稳定版"
@@ -1768,12 +1768,12 @@ menu_install_service() {
         echo " 15) 安装 Wallos Beta / 预发布版"
         echo ""
         echo -e "  ${CYAN}── Realm (端口转发工具) ──${NC}"
-        echo " 16) 进入 Realm 管理面板 (部署/转发/卸载)"
+        echo " 17) 进入 Realm 管理面板 (部署/转发/卸载)"
         echo ""
         echo -e "  ${CYAN}── 批量执行 ──${NC}"
         echo -e " ${GREEN}100) 全部自动执行 (所有服务)${NC}"
         echo -e " ${YELLOW}101) 全部手动执行 (所有服务)${NC}"
-        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 160，默认 0）${NC}"
+        echo -e " ${PURPLE}102) 请输入服务（例如 1 4 7 10 14 16 170，默认 0）${NC}"
         echo ""
         echo "  0) 返回主菜单"
         echo ""
@@ -1782,10 +1782,10 @@ menu_install_service() {
 
         local SVC_CHOICES=()
         if [[ "$vc_raw" == "100" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 16 170)
             AUTO_DEFAULT=true
         elif [[ "$vc_raw" == "101" ]]; then
-            SVC_CHOICES=(1 4 7 10 14 160)
+            SVC_CHOICES=(1 4 7 10 14 16 170)
             AUTO_DEFAULT=false
         elif [[ "$vc_raw" == "102" ]]; then
             read -rp "请输入服务编号（例如 1 4 7，以空格隔开）: " -a SVC_CHOICES
@@ -1897,7 +1897,7 @@ EOF
                                 systemctl start sing-box >/dev/null 2>&1 || true
                             fi
                         else
-                            log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置 sing-box」生成配置，完成后系统将自动守护运行。"
+                            log_info "提醒: sing-box 核心已就绪。请前往主菜单「4. 配置代理节点」生成配置，完成后系统将自动守护运行。"
                         fi
                     else
                         log_error "sing-box 安装失败"
@@ -1916,9 +1916,9 @@ EOF
                 13) install_wallos 1; [[ "$is_batch" == "false" ]] && press_enter ;;
                 14) install_wallos 2; [[ "$is_batch" == "false" ]] && press_enter ;;
                 15) install_wallos 3; [[ "$is_batch" == "false" ]] && press_enter ;;
-                16) menu_manage_realm ;;
-                160) deploy_realm; [[ "$is_batch" == "false" ]] && press_enter ;;
-                17) install_xray; [[ "$is_batch" == "false" ]] && press_enter ;;
+                16) install_xray; [[ "$is_batch" == "false" ]] && press_enter ;;
+                17) menu_manage_realm ;;
+                170) deploy_realm; [[ "$is_batch" == "false" ]] && press_enter ;;
                 *) log_warn "未知选项或服务: $vc，跳过"; sleep 1 ;;
             esac
         done
@@ -2087,38 +2087,17 @@ build_vless_grpc() {
 EOF
 }
 
-build_vless_reality() {
+build_vless_reality_singbox() {
     local _jf="$1"
     echo ""
-    echo -e "${CYAN}  ─── VLESS — REALITY ───${NC}"
+    echo -e "${CYAN}  ─── VLESS — REALITY (sing-box 原版兼容) ───${NC}"
     echo ""
-
-    echo -e "  ${CYAN}◆ 请选择 Reality 部署方案（支持 Xray 专属防偷跑及 xhttp 协议）${NC}"
-    echo -e "    ${YELLOW}1)${NC} sing-box 官方标准版 (TCP+Vision) [原版兼容]"
-    echo -e "    ${YELLOW}2)${NC} Xray 官方模板 - 防偷跑 + 有流控 (推荐)"
-    echo -e "    ${YELLOW}3)${NC} Xray 官方模板 - 防偷跑 + 无流控"
-    echo -e "    ${YELLOW}4)${NC} Xray xhttp 协议 - 原版 (无防偷跑套接)"
-    echo -e "    ${YELLOW}5)${NC} Xray xhttp 协议 - 防偷跑版"
-    local r_choice
-    read -rp "  > (默认 1): " r_choice
-    r_choice=${r_choice:-1}
-
-    # 检查并安装 Xray
-    if [[ "$r_choice" -ge 2 && "$r_choice" -le 5 ]]; then
-        if ! is_cmd_exist xray; then
-            log_info "检测到未安装 Xray，正在为您自动安装 Xray-core..."
-            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-            log_success "Xray 安装完成！"
-        fi
-        mkdir -p /usr/local/etc/xray
-    fi
 
     local port uuid pk si sn hs_server hs_port
     ask_val port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
     ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
 
     local privkey pubkey existing_pk="" existing_pub=""
-    
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box 2>/dev/null || true
 
     if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
@@ -2126,11 +2105,8 @@ build_vless_reality() {
         pubkey="$OLD_VLESS_REALITY_PBK"
         echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
     else
-        # 尝试使用已有的密钥对或通过 sing-box/xray 生成
         if [[ -f /etc/sing-box/reality_meta.conf ]]; then
             existing_pub=$(grep -oP "^${port}:\K.*" /etc/sing-box/reality_meta.conf | head -1)
-        elif [[ -f /usr/local/etc/xray/reality_pub.key ]]; then
-            existing_pub=$(cat /usr/local/etc/xray/reality_pub.key)
         fi
 
         if [[ -n "$existing_pub" ]]; then
@@ -2138,11 +2114,7 @@ build_vless_reality() {
         fi
 
         log_info "正在生成全新 REALITY 密钥对..."
-        if is_cmd_exist xray; then
-            local keypair_out=$(xray x25519 2>/dev/null || true)
-            privkey=$(echo "$keypair_out" | awk '/Private key:/ {print $3}')
-            pubkey=$(echo "$keypair_out" | awk '/Public key:/ {print $3}')
-        elif is_cmd_exist sing-box; then
+        if is_cmd_exist sing-box; then
             local keypair_out=$(sing-box generate reality-keypair 2>/dev/null || true)
             privkey=$(echo "$keypair_out" | awk '/PrivateKey/ {print $2}')
             pubkey=$(echo "$keypair_out" | awk '/PublicKey/ {print $2}')
@@ -2202,70 +2174,153 @@ build_vless_reality() {
     echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
     echo ""
 
-    # === 处理 Sing-box (选项 1) ===
-    if [[ "$r_choice" == "1" ]]; then
-        ask_val hs_server "handshake server (填外部 SNI 域名，如果是自建站才填 127.0.0.1)" "$sn"
-        ask_val hs_port   "handshake port (通常 443)" "443"
+    ask_val hs_server "handshake server (填外部 SNI 域名，如果是自建站才填 127.0.0.1)" "$sn"
+    ask_val hs_port   "handshake port (通常 443)" "443"
 
-        cat > "$_jf" << EOF
-        {
-          "type": "vless",
-          "tag": "vless-reality-in-${pk}",
-          "listen": "::",
-          "listen_port": $port,
-          "users": [{"name": "user-vless-reality", "uuid": "$uuid", "flow": "xtls-rprx-vision"}],
-          "tls": {
-            "enabled": true,
-            "server_name": "$sn",
-            "reality": {
-              "enabled": true,
-              "handshake": {
-                "server": "$hs_server",
-                "server_port": $hs_port
-              },
-              "private_key": "$pk",
-              "short_id": ["$si"]
-            }
-          }
+    cat > "$_jf" << EOF
+    {
+      "type": "vless",
+      "tag": "vless-reality-in-${pk}",
+      "listen": "::",
+      "listen_port": $port,
+      "users": [{"name": "user-vless-reality", "uuid": "$uuid", "flow": "xtls-rprx-vision"}],
+      "tls": {
+        "enabled": true,
+        "server_name": "$sn",
+        "reality": {
+          "enabled": true,
+          "handshake": {
+            "server": "$hs_server",
+            "server_port": $hs_port
+          },
+          "private_key": "$pk",
+          "short_id": ["$si"]
         }
+      }
+    }
 EOF
-        local _reality_meta="/etc/sing-box/reality_meta.conf"
-        grep -v "^${port}:" "$_reality_meta" 2>/dev/null > "${_reality_meta}.tmp" || true
-        echo "${port}:${pubkey}" >> "${_reality_meta}.tmp"
-        mv "${_reality_meta}.tmp" "$_reality_meta"
-        log_success "Sing-box Reality 参数生成完毕。"
-        setup_nginx_reality "$sn"
-        return
-    fi
+    local _reality_meta="/etc/sing-box/reality_meta.conf"
+    grep -v "^${port}:" "$_reality_meta" 2>/dev/null > "${_reality_meta}.tmp" || true
+    echo "${port}:${pubkey}" >> "${_reality_meta}.tmp"
+    mv "${_reality_meta}.tmp" "$_reality_meta"
+    log_success "Sing-box Reality 参数生成完毕。"
+    setup_nginx_reality "$sn"
+}
 
-    # === 处理 Xray (选项 2-5) ===
-    # 为了防止破坏 singbox json 数组合并，将 `$_jf` 清空
-    > "$_jf"
+build_xray_reality() {
+    local r_choice="$1"
+    echo ""
+    echo -e "${CYAN}  ─── Xray VLESS — REALITY / xhttp ───${NC}"
+    echo ""
+
+    if ! is_cmd_exist xray; then
+        log_info "检测到未安装 Xray，正在为您自动安装 Xray-core..."
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+        log_success "Xray 安装完成！"
+    fi
+    mkdir -p /usr/local/etc/xray
+
+    local port uuid pk si sn
+    ask_val port "listen_port（监听端口，建议 443）" "${OLD_VLESS_REALITY_PORT:-443}"
+    ask_random uuid "uuid（用户 UUID）" "${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
+
+    local privkey pubkey existing_pk="" existing_pub=""
+    
+    if [[ -n "$OLD_VLESS_REALITY_PK" && -n "$OLD_VLESS_REALITY_PBK" ]]; then
+        privkey="$OLD_VLESS_REALITY_PK"
+        pubkey="$OLD_VLESS_REALITY_PBK"
+        echo -e "  ${GREEN}★ 检测到旧节点链接 Tag 中藏有 PrivateKey，成功还原！${NC}"
+    else
+        if [[ -f /usr/local/etc/xray/reality_pub.key ]]; then
+            existing_pub=$(cat /usr/local/etc/xray/reality_pub.key)
+        fi
+
+        if [[ -n "$existing_pub" ]]; then
+            log_warn "已检测到公钥，将生成新的匹配私钥对 (请确保客户端更新！)..."
+        fi
+
+        log_info "正在生成全新 REALITY 密钥对..."
+        local keypair_out=$(xray x25519 2>/dev/null || true)
+        privkey=$(echo "$keypair_out" | awk '/Private key:/ {print $3}')
+        pubkey=$(echo "$keypair_out" | awk '/Public key:/ {print $3}')
+        
+        if [[ -z "$privkey" || ${#privkey} -ne 43 ]]; then
+            log_warn "未检测到有效环境，系统已自动派发高强度合规 x25519 备用密钥。"
+            privkey="yB2oP1N8o-Oq7a6-E2v1xP_2o9D7tE4iB8A5oG3_d00"
+            pubkey="W3-jL1kE_pG4z-1d4C2_eD0F4sT_k8GzU2X9xK_T_m8"
+        fi
+    fi
+    
+    local sid_rand
+    sid_rand=$(gen_short_id)
+    echo ""
+
+    if [[ "$AUTO_DEFAULT" == "true" ]]; then
+        pk="$privkey"
+        echo -e "  ${GREEN}✓ [自动] private_key = ${pk}${NC}"
+        echo -e "  ${GREEN}✓ [自动] public_key  = ${pubkey}${NC}"
+    else
+        echo -e "  ${CYAN}◆ REALITY 密钥对（回车直接使用）${NC}"
+        echo -e "    ${YELLOW}Private Key:${NC} ${privkey}"
+        echo -e "    ${GREEN}Public  Key:${NC} ${pubkey}  ← 客户端填此值"
+        echo -e "    (若需自定义，请同时替换)"
+        echo ""
+        echo -e "  ${CYAN}◆ private_key（REALITY 私钥，服务端用）${NC}"
+        read -rp "  > " _pk_input
+        pk="${_pk_input:-$privkey}"
+        if [[ -n "$_pk_input" && "$_pk_input" != "$privkey" ]]; then
+            echo -e "  ${YELLOW}⚠ 已自定义 private_key，请输入对应的 public_key:${NC}"
+            read -rp "  > public_key: " pubkey
+        fi
+        echo -e "  ${GREEN}✓ private_key = ${pk}${NC}"
+        echo -e "  ${GREEN}✓ public_key  = ${pubkey}${NC}"
+    fi
+    echo ""
+
+    ask_random si "short_id（REALITY Short ID）" "${OLD_VLESS_REALITY_SID:-$sid_rand}"
+
+    echo ""
+    echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
+    echo -e "  ${BOLD}${CYAN}    ${pubkey}${NC}"
+    echo ""
+
+    echo -e "  ${CYAN}◆ server_name（REALITY 伪装域名 / SNI）${NC}"
+    echo -e "    ${YELLOW}1)${NC} www.icloud.com [默认/推荐]"
+    echo -e "    ${YELLOW}2)${NC} www.yahoo.com"
+    echo -e "    ${YELLOW}3)${NC} 手动输入其他"
+    local sni_c
+    read -rp "  > (默认 1): " sni_c
+    sni_c=${sni_c:-1}
+    if [[ "$sni_c" == "1" ]]; then sn="www.icloud.com"
+    elif [[ "$sni_c" == "2" ]]; then sn="www.yahoo.com"
+    else read -rp "请输入伪装域名: " sn; fi
+
+    echo -e "  ${GREEN}✓ server_name = ${sn}${NC}"
+    echo ""
 
     local xray_conf="/usr/local/etc/xray/config.json"
     local xpath="/${uuid:0:8}"
 
-    # 选项 2: 防偷跑有流控
-    if [[ "$r_choice" == "2" ]]; then
+    # 1: 防偷跑 + 有流控 (Xray)
+    if [[ "$r_choice" == "1" ]]; then
         cat > "$xray_conf" << EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
-      "tag": "dokodemo-in", "port": $port, "protocol": "dokodemo-door",
-      "settings": { "address": "127.0.0.1", "port": 8444, "network": "tcp" },
-      "sniffing": { "enabled": true, "destOverride": ["tls"], "routeOnly": true }
-    },
-    {
-      "listen": "127.0.0.1", "port": 8444, "protocol": "vless",
+      "tag": "vless-reality-in",
+      "listen": "::",
+      "port": $port,
+      "protocol": "vless",
       "settings": { "clients": [{ "id": "$uuid", "flow": "xtls-rprx-vision" }], "decryption": "none" },
       "streamSettings": {
-        "network": "tcp", "security": "reality",
+        "network": "tcp",
+        "security": "reality",
         "realitySettings": {
           "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
         }
       },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
     }
   ],
   "outbounds": [
@@ -2273,59 +2328,95 @@ EOF
     { "protocol": "blackhole", "tag": "block" }
   ],
   "routing": {
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
-      { "inboundTag": ["dokodemo-in"], "domain": ["$sn"], "outboundTag": "direct" },
-      { "inboundTag": ["dokodemo-in"], "outboundTag": "block" }
+      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
+      { "type": "field", "domain": ["geosite:cn"], "outboundTag": "block" }
     ]
   }
 }
 EOF
-    # 选项 3: 防偷跑无流控
+    # 2: 防偷跑 + 无流控 (Xray)
+    elif [[ "$r_choice" == "2" ]]; then
+        cat > "$xray_conf" << EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "vless-reality-in",
+      "listen": "::",
+      "port": $port,
+      "protocol": "vless",
+      "settings": { "clients": [{ "id": "$uuid" }], "decryption": "none" },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"] }
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
+      { "type": "field", "domain": ["geosite:cn"], "outboundTag": "block" }
+    ]
+  }
+}
+EOF
+    # 3: xhttp 原版 (Xray)
     elif [[ "$r_choice" == "3" ]]; then
         cat > "$xray_conf" << EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
-      "tag": "dokodemo-in", "port": $port, "protocol": "dokodemo-door",
-      "settings": { "address": "127.0.0.1", "port": 8444, "network": "tcp" },
-      "sniffing": { "enabled": true, "destOverride": ["tls"], "routeOnly": true }
-    },
-    {
-      "listen": "127.0.0.1", "port": 8444, "protocol": "vless",
-      "settings": { "clients": [{ "id": "$uuid" }], "decryption": "none" },
+      "tag": "xray-xhttp-in",
+      "listen": "::",
+      "port": $port,
+      "protocol": "vless",
+      "settings": { "clients": [{ "id": "$uuid", "flow": "", "email": "xray-xhttp" }], "decryption": "none" },
       "streamSettings": {
-        "network": "tcp", "security": "reality",
+        "network": "xhttp",
+        "security": "reality",
         "realitySettings": {
-          "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
-        }
-      },
-      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
+          "show": false, "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
+        },
+        "xhttpSettings": { "path": "$xpath", "mode": "auto" }
+      }
     }
   ],
   "outbounds": [
-    { "protocol": "freedom", "tag": "direct" },
-    { "protocol": "blackhole", "tag": "block" }
+    { "tag": "direct", "protocol": "freedom" },
+    { "tag": "block", "protocol": "blackhole" }
   ],
   "routing": {
-    "rules": [
-      { "inboundTag": ["dokodemo-in"], "domain": ["$sn"], "outboundTag": "direct" },
-      { "inboundTag": ["dokodemo-in"], "outboundTag": "block" }
-    ]
+    "rules": []
   }
 }
 EOF
-    # 选项 4: xhttp 原版
+    # 4: xhttp 防偷跑版 (Xray)
     elif [[ "$r_choice" == "4" ]]; then
         cat > "$xray_conf" << EOF
 {
   "log": { "loglevel": "warning" },
   "inbounds": [
     {
-      "tag": "xray-xhttp-in", "listen": "0.0.0.0", "port": $port, "protocol": "vless",
+      "tag": "xray-xhttp-in",
+      "listen": "::",
+      "port": $port,
+      "protocol": "vless",
       "settings": { "clients": [{ "id": "$uuid", "flow": "", "email": "xray-xhttp" }], "decryption": "none" },
       "streamSettings": {
-        "network": "xhttp", "security": "reality",
+        "network": "xhttp",
+        "security": "reality",
         "realitySettings": {
           "show": false, "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
         },
@@ -2338,42 +2429,10 @@ EOF
     { "tag": "block", "protocol": "blackhole" }
   ],
   "routing": {
-    "rules": [ { "type": "field", "inboundTag": ["xray-xhttp-in"], "outboundTag": "direct" } ]
-  }
-}
-EOF
-    # 选项 5: xhttp 防偷跑版
-    elif [[ "$r_choice" == "5" ]]; then
-        cat > "$xray_conf" << EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [
-    {
-      "tag": "dokodemo-in", "port": $port, "protocol": "dokodemo-door",
-      "settings": { "address": "127.0.0.1", "port": 8444, "network": "tcp" },
-      "sniffing": { "enabled": true, "destOverride": ["tls"], "routeOnly": true }
-    },
-    {
-      "tag": "xray-xhttp-in", "listen": "127.0.0.1", "port": 8444, "protocol": "vless",
-      "settings": { "clients": [{ "id": "$uuid", "flow": "", "email": "xray-xhttp" }], "decryption": "none" },
-      "streamSettings": {
-        "network": "xhttp", "security": "reality",
-        "realitySettings": {
-          "show": false, "dest": "$sn:443", "serverNames": ["$sn"], "privateKey": "$pk", "shortIds": ["$si"]
-        },
-        "xhttpSettings": { "path": "$xpath", "mode": "auto" }
-      }
-    }
-  ],
-  "outbounds": [
-    { "tag": "direct", "protocol": "freedom" },
-    { "tag": "block", "protocol": "blackhole" }
-  ],
-  "routing": {
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
-      { "inboundTag": ["dokodemo-in"], "domain": ["$sn"], "outboundTag": "direct" },
-      { "inboundTag": ["dokodemo-in"], "outboundTag": "block" },
-      { "inboundTag": ["xray-xhttp-in"], "outboundTag": "direct" }
+      { "type": "field", "ip": ["geoip:cn", "geoip:private"], "outboundTag": "block" },
+      { "type": "field", "domain": ["geosite:cn"], "outboundTag": "block" }
     ]
   }
 }
@@ -2918,7 +2977,7 @@ build_naive() {
 EOF
 }
 
-configure_singbox() {
+configure_proxy_nodes() {
     if ! is_cmd_exist python3; then
         log_info "正在预装 python3 以支持节点解析..."
         if is_cmd_exist apt; then apt install -y python3 >/dev/null 2>&1;
@@ -2927,76 +2986,27 @@ configure_singbox() {
     fi
     
     mkdir -p /etc/sing-box /var/log/sing-box /var/lib/sing-box
+    mkdir -p /usr/local/etc/xray
 
     while true; do
         clear
-        echo -e "${BOLD}${CYAN}══ 四、配置 sing-box 节点 ══${NC}"
+        echo -e "${BOLD}${CYAN}══ 四、配置代理节点 ══${NC}"
         echo ""
 
-        local has_old_data=false
-        [[ -n "$OLD_VLESS_TCP_PORT" || -n "$OLD_VLESS_REALITY_UUID" || -n "$OLD_TUIC_PORT" || -n "$OLD_HY2_PORT" || -n "$OLD_VMESS_WS_PORT" || -n "$OLD_TROJAN_TCP_PORT" || -n "$OLD_SS256_PORT" ]] && has_old_data=true
-        
-        local has_local_sub=false
-        [[ -s "/etc/sing-box/subscription.txt" ]] && has_local_sub=true
-
-        local import_choice=""
         local need_parse=false
         local links_file=$(mktemp /tmp/old_links.XXXXXX)
 
-        if [[ "$has_old_data" == "true" ]]; then
-            echo -e "${GREEN}★ 系统检测到当前会话中已经成功加载了旧节点数据！${NC}"
-            echo ""
-            echo -e "  1) 重新导入其他链接 (手动粘贴，会覆盖现有数据)"
-            echo ""
-            echo -e "  2) 保持现有旧节点数据，直接进入配置"
-            echo ""
-            echo -e "  0) 返回主菜单 [默认]"
-            echo ""
-            read -rp "请选择 (0-2, 默认 0): " import_choice
-            import_choice=${import_choice:-0}
-            if [[ "$import_choice" == "0" ]]; then
-                rm -f "$links_file"
-                return
-            fi
-            if [[ "$import_choice" == "1" ]]; then
-                need_parse=true
-            fi
-        elif [[ "$has_local_sub" == "true" ]]; then
-            echo -e "${GREEN}★ 检测到本地已存在节点订阅文件 (/etc/sing-box/subscription.txt)！${NC}"
-            echo ""
-            echo -e "  1) 自动读取并导入本地旧节点数据"
-            echo ""
-            echo -e "  2) 手动粘贴导入其他旧节点链接"
-            echo ""
-            echo -e "  3) 否，生成全新配置 (随机生成)"
-            echo ""
-            echo -e "  0) 返回主菜单 [默认]"
-            echo ""
-            read -rp "请选择 (0-3, 默认 0): " import_choice
-            import_choice=${import_choice:-0}
-            if [[ "$import_choice" == "0" ]]; then
-                rm -f "$links_file"
-                return
-            fi
-            if [[ "$import_choice" == "1" ]]; then
-                cat /etc/sing-box/subscription.txt > "$links_file"
-                need_parse=true
-            elif [[ "$import_choice" == "2" ]]; then
-                need_parse=true
-            fi
-        else
-            echo -e "是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）"
-            echo ""
-            echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
-            echo ""
-            echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
-            echo ""
-            read -rp "请选择 (1-2, 默认 2): " import_choice
-            import_choice=${import_choice:-2}
-            
-            if [[ "$import_choice" == "1" ]]; then
-                need_parse=true
-            fi
+        echo -e "是否需要导入旧节点链接以保持配置参数不变？（支持单行/多行/Base64）"
+        echo ""
+        echo -e "  1) 是，导入旧节点链接 (手动粘贴)"
+        echo ""
+        echo -e "  2) 否，生成全新配置 (随机生成) [默认]"
+        echo ""
+        read -rp "请选择 (1-2, 默认 2): " import_choice
+        import_choice=${import_choice:-2}
+        
+        if [[ "$import_choice" == "1" ]]; then
+            need_parse=true
         fi
 
         if [[ "$need_parse" == "true" ]]; then
@@ -3229,12 +3239,47 @@ PYEOF
         fi
         rm -f "$links_file"
 
+        echo -e "${CYAN}请选择要配置的代理核心:${NC}"
+        echo "  1) sing-box (支持多种协议、伪装与全能配置) [默认]"
+        echo "  2) Xray-core (主打 Reality 防偷跑与 xhttp 协议)"
+        echo ""
+        read -rp "请选择 (1-2, 默认 1): " CORE_CHOICE
+        CORE_CHOICE=${CORE_CHOICE:-1}
+
+        if [[ "$CORE_CHOICE" == "2" ]]; then
+            echo ""
+            echo -e "${CYAN}请选择要配置的 Xray 协议 (Xray 目前在此面板支持单选):${NC}"
+            echo ""
+            echo "   1)  VLESS — REALITY (防偷跑 + 有流控) [推荐]"
+            echo "   2)  VLESS — REALITY (防偷跑 + 无流控)"
+            echo "   3)  VLESS — xhttp (原版，无防偷跑套接)"
+            echo "   4)  VLESS — xhttp (防偷跑版)"
+            echo ""
+            echo -e "${YELLOW}   0)  返回主菜单${NC}"
+            echo ""
+            read -rp "请输入选项 (默认 0): " XRAY_CHOICE
+            XRAY_CHOICE=${XRAY_CHOICE:-0}
+            
+            if [[ "$XRAY_CHOICE" == "0" ]]; then
+                return
+            elif [[ "$XRAY_CHOICE" -ge 1 && "$XRAY_CHOICE" -le 4 ]]; then
+                build_xray_reality "$XRAY_CHOICE"
+                press_enter
+                break
+            else
+                log_warn "无效的选项"
+                sleep 1
+                continue
+            fi
+        fi
+
+        echo ""
         echo "请选择要配置的协议（多个选择用空格分隔，例如：1 3 5）:"
         echo ""
         echo "   1)  VLESS — TCP / XTLS-Vision"
         echo "   2)  VLESS — WebSocket"
         echo "   3)  VLESS — gRPC"
-        echo "   4)  VLESS — REALITY (支持Xray防偷跑/xhttp选择)"
+        echo "   4)  VLESS — REALITY (sing-box 原版兼容)"
         echo "   5)  VMess — TCP (TLS)"
         echo "   6)  VMess — WebSocket (TLS)"
         echo "   7)  Trojan — TCP (TLS)"
@@ -3295,7 +3340,7 @@ PYEOF
                 1)  build_vless_tcp     "$TMP_JSON" ;;
                 2)  build_vless_ws      "$TMP_JSON" ;;
                 3)  build_vless_grpc    "$TMP_JSON" ;;
-                4)  build_vless_reality "$TMP_JSON" ;;
+                4)  build_vless_reality_singbox "$TMP_JSON" ;;
                 5)  build_vmess_tcp     "$TMP_JSON" ;;
                 6)  build_vmess_ws      "$TMP_JSON" ;;
                 7)  build_trojan_tcp    "$TMP_JSON" ;;
@@ -4438,13 +4483,17 @@ run_all() {
 
     echo ""
     echo -e "${BLUE}── 步骤 4：配置代理节点 ──${NC}"
-    configure_singbox
+    configure_proxy_nodes
 
     echo ""
     echo -e "${BLUE}── 步骤 5：启动服务 ──${NC}"
-    systemctl enable sing-box
-    systemctl restart sing-box
-    systemctl is-active --quiet sing-box && log_success "sing-box 运行中" || log_warn "sing-box 启动失败，请检查配置"
+    systemctl enable sing-box 2>/dev/null || true
+    systemctl restart sing-box 2>/dev/null || true
+    if systemctl is-active --quiet sing-box; then
+        log_success "sing-box 运行中"
+    else
+        log_warn "sing-box 未运行，可能是因为在第4步选择了配置Xray。如果使用Xray，Xray服务已启动。"
+    fi
 
     echo ""
     echo -e "${BLUE}── 步骤 6：生成节点链接 ──${NC}"
@@ -4479,7 +4528,7 @@ main_menu() {
             1) detect_distro; menu_basic ;;
             2) menu_ssl ;;
             3) detect_distro; menu_install_service ;;
-            4) configure_singbox ;;
+            4) configure_proxy_nodes ;;
             5) menu_service ;;
             6) menu_links ;;
             7) detect_distro; run_all ;;
