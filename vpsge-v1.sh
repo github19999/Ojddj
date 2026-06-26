@@ -2690,41 +2690,139 @@ EOF
 build_xray_config() {
     local type_id="$1"
     local port=443
-    local uuid dest sni pbk pk sid path
+    local uuid dest sni pbk pk sid path cert key password method flow
 
     uuid="${OLD_VLESS_REALITY_UUID:-$(gen_uuid)}"
-    dest="www.icloud.com:443"
-    sni="www.icloud.com"
-    sid="${OLD_VLESS_REALITY_SID:-$(gen_short_id)}"
-    path="/$(openssl rand -hex 4)"
-
-    log_info "正在生成 Xray REALITY / xhttp 密钥对..."
-    if is_cmd_exist xray; then
-        local keys
-        keys=$(xray x25519)
-        pk=$(echo "$keys" | grep "Private key" | awk '{print $3}')
-        pbk=$(echo "$keys" | grep "Public key" | awk '{print $3}')
-    else
-        log_warn "未检测到 Xray，使用默认高强度备用密钥"
-        pk="UDtGvAI67X2xLPL50IC4DI15mZcaZqofAkE3saxvQ1w"
-        pbk="nE05JWUkmSpBxY5fY_YRhiQU4AvQhjmKGqE-oDDyGTA"
-    fi
+    password="$(gen_password 16)"
 
     mkdir -p /usr/local/etc/xray 2>/dev/null || true
-    echo "${port}:${pbk}" > /usr/local/etc/xray/reality_pub.conf
 
-    echo ""
-    echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
-    echo -e "  ${BOLD}${CYAN}    ${pbk}${NC}"
-    echo ""
+    # Reality/xhttp 协议 (4-7)
+    if [[ "$type_id" =~ ^(4|5|6|7)$ ]]; then
+        dest="www.icloud.com:443"
+        sni="www.icloud.com"
+        sid="${OLD_VLESS_REALITY_SID:-$(gen_short_id)}"
+        path="/$(openssl rand -hex 4)"
 
-    if [[ "$type_id" == "4" ]]; then
-        cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-    "inbounds": [
+        log_info "正在生成 Xray REALITY / xhttp 密钥对..."
+        if is_cmd_exist xray; then
+            local keys
+            keys=$(xray x25519)
+            pk=$(echo "$keys" | grep "Private key" | awk '{print $3}')
+            pbk=$(echo "$keys" | grep "Public key" | awk '{print $3}')
+        else
+            log_warn "未检测到 Xray，使用默认高强度备用密钥"
+            pk="UDtGvAI67X2xLPL50IC4DI15mZcaZqofAkE3saxvQ1w"
+            pbk="nE05JWUkmSpBxY5fY_YRhiQU4AvQhjmKGqE-oDDyGTA"
+        fi
+        echo "${port}:${pbk}" > /usr/local/etc/xray/reality_pub.conf
+
+        echo ""
+        echo -e "  ${BOLD}${GREEN}★ 客户端需要的 public_key（请复制保存）:${NC}"
+        echo -e "  ${BOLD}${CYAN}    ${pbk}${NC}"
+        echo ""
+    fi
+
+    # TLS 协议 (1-3, 8-11)
+    if [[ "$type_id" =~ ^(1|2|3|8|9|10|11)$ ]]; then
+        ask_val port "listen_port（监听端口）" "443"
+        select_server_name "example.com" "" "1"
+        sni="$SELECTED_SN"
+        ask_cert_paths "$sni"
+        cert="$CERT_PATH"
+        key="$KEY_PATH"
+
+        if [[ "$type_id" == "2" || "$type_id" == "9" || "$type_id" == "11" ]]; then
+            ask_val path "WebSocket 路径" "/xray-ws"
+        fi
+        if [[ "$type_id" == "3" ]]; then
+            ask_val path "gRPC Service Name" "xray-grpc"
+        fi
+    fi
+
+    # Shadowsocks 协议 (12-14)
+    if [[ "$type_id" =~ ^(12|13|14)$ ]]; then
+        ask_val port "listen_port（监听端口）" "46792"
+        if [[ "$type_id" == "12" ]]; then method="aes-256-gcm"; fi
+        if [[ "$type_id" == "13" ]]; then method="2022-blake3-aes-256-gcm"; password="$(gen_ss2022_key_256)"; fi
+        if [[ "$type_id" == "14" ]]; then method="2022-blake3-aes-128-gcm"; password="$(gen_ss2022_key_128)"; fi
+    fi
+
+    local INBOUND_JSON=""
+    local tag="xray-inbound"
+    case $type_id in
+        1) tag="xray-vless-tcp" ;;
+        2) tag="xray-vless-ws" ;;
+        3) tag="xray-vless-grpc" ;;
+        8) tag="xray-vmess-tcp" ;;
+        9) tag="xray-vmess-ws" ;;
+        10) tag="xray-trojan-tcp" ;;
+        11) tag="xray-trojan-ws" ;;
+        12|13|14) tag="xray-ss" ;;
+    esac
+
+    case $type_id in
+        1)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "$uuid", "flow": "xtls-rprx-vision"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]}
+            }
+        }
+EOF
+)
+            ;;
+        2)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "$uuid"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]},
+                "wsSettings": {"path": "$path"}
+            }
+        }
+EOF
+)
+            ;;
+        3)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "$uuid"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "grpc",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]},
+                "grpcSettings": {"serviceName": "$path"}
+            }
+        }
+EOF
+)
+            ;;
+        4)
+            INBOUND_JSON=$(cat <<EOF
         {
             "tag": "dokodemo-in",
             "port": $port,
@@ -2734,23 +2832,15 @@ build_xray_config() {
                 "port": 8444,
                 "network": "tcp"
             },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["tls"],
-                "routeOnly": true
-            }
+            "sniffing": {"enabled": true, "destOverride": ["tls"], "routeOnly": true}
         },
         {
+            "tag": "xray-reality-in",
             "listen": "127.0.0.1",
             "port": 8444,
             "protocol": "vless",
             "settings": {
-                "clients": [
-                    {
-                        "id": "$uuid",
-                        "flow": "xtls-rprx-vision"
-                    }
-                ],
+                "clients": [{"id": "$uuid", "flow": "xtls-rprx-vision"}],
                 "decryption": "none"
             },
             "streamSettings": {
@@ -2763,45 +2853,13 @@ build_xray_config() {
                     "shortIds": ["", "$sid"]
                 }
             },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"],
-                "routeOnly": true
-            }
+            "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true}
         }
-    ],
-    "outbounds": [
-        {
-            "protocol": "freedom",
-            "tag": "direct"
-        },
-        {
-            "protocol": "blackhole",
-            "tag": "block"
-        }
-    ],
-    "routing": {
-        "rules": [
-            {
-                "inboundTag": ["dokodemo-in"],
-                "domain": ["$sni"],
-                "outboundTag": "direct"
-            },
-            {
-                "inboundTag": ["dokodemo-in"],
-                "outboundTag": "block"
-            }
-        ]
-    }
-}
 EOF
-    elif [[ "$type_id" == "5" ]]; then
-        cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-    "inbounds": [
+)
+            ;;
+        5)
+            INBOUND_JSON=$(cat <<EOF
         {
             "tag": "dokodemo-in",
             "port": $port,
@@ -2811,22 +2869,15 @@ EOF
                 "port": 8444,
                 "network": "tcp"
             },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["tls"],
-                "routeOnly": true
-            }
+            "sniffing": {"enabled": true, "destOverride": ["tls"], "routeOnly": true}
         },
         {
+            "tag": "xray-reality-in",
             "listen": "127.0.0.1",
             "port": 8444,
             "protocol": "vless",
             "settings": {
-                "clients": [
-                    {
-                        "id": "$uuid"
-                    }
-                ],
+                "clients": [{"id": "$uuid"}],
                 "decryption": "none"
             },
             "streamSettings": {
@@ -2839,25 +2890,185 @@ EOF
                     "shortIds": ["", "$sid"]
                 }
             },
-            "sniffing": {
-                "enabled": true,
-                "destOverride": ["http", "tls", "quic"],
-                "routeOnly": true
+            "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true}
+        }
+EOF
+)
+            ;;
+        6)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "xray-xhttp-in",
+            "listen": "0.0.0.0",
+            "port": $port,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "$uuid", "flow": "", "email": "xray-xhttp"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "$dest",
+                    "serverNames": ["$sni"],
+                    "privateKey": "$pk",
+                    "shortIds": ["$sid"]
+                },
+                "xhttpSettings": {"path": "$path", "mode": "auto"}
             }
         }
-    ],
-    "outbounds": [
+EOF
+)
+            ;;
+        7)
+            INBOUND_JSON=$(cat <<EOF
         {
-            "protocol": "freedom",
-            "tag": "direct"
+            "tag": "dokodemo-in",
+            "port": $port,
+            "protocol": "dokodemo-door",
+            "settings": {
+                "address": "127.0.0.1",
+                "port": 8444,
+                "network": "tcp"
+            },
+            "sniffing": {"enabled": true, "destOverride": ["tls"], "routeOnly": true}
         },
         {
-            "protocol": "blackhole",
-            "tag": "block"
+            "tag": "xray-xhttp-in",
+            "listen": "127.0.0.1",
+            "port": 8444,
+            "protocol": "vless",
+            "settings": {
+                "clients": [{"id": "$uuid", "flow": "", "email": "xray-xhttp"}],
+                "decryption": "none"
+            },
+            "streamSettings": {
+                "network": "xhttp",
+                "security": "reality",
+                "realitySettings": {
+                    "show": false,
+                    "dest": "$dest",
+                    "serverNames": ["$sni"],
+                    "privateKey": "$pk",
+                    "shortIds": ["$sid"]
+                },
+                "xhttpSettings": {"path": "$path", "mode": "auto"}
+            }
         }
+EOF
+)
+            ;;
+        8)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [{"id": "$uuid", "alterId": 0}]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]}
+            }
+        }
+EOF
+)
+            ;;
+        9)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "vmess",
+            "settings": {
+                "clients": [{"id": "$uuid", "alterId": 0}]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]},
+                "wsSettings": {"path": "$path"}
+            }
+        }
+EOF
+)
+            ;;
+        10)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [{"password": "$uuid"}]
+            },
+            "streamSettings": {
+                "network": "tcp",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]}
+            }
+        }
+EOF
+)
+            ;;
+        11)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "trojan",
+            "settings": {
+                "clients": [{"password": "$uuid"}]
+            },
+            "streamSettings": {
+                "network": "ws",
+                "security": "tls",
+                "tlsSettings": {"certificates": [{"certificateFile": "$cert", "keyFile": "$key"}]},
+                "wsSettings": {"path": "$path"}
+            }
+        }
+EOF
+)
+            ;;
+        12|13|14)
+            INBOUND_JSON=$(cat <<EOF
+        {
+            "tag": "$tag",
+            "port": $port,
+            "protocol": "shadowsocks",
+            "settings": {
+                "method": "$method",
+                "password": "$password"
+            }
+        }
+EOF
+)
+            ;;
+    esac
+
+    # 如果是常规 TLS 协议或 Shadowsocks，应用统一外壳
+    if [[ "$type_id" =~ ^(1|2|3|8|9|10|11|12|13|14)$ ]]; then
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {"loglevel": "warning"},
+    "inbounds": [
+        $INBOUND_JSON
     ],
-    "routing": {
-        "rules": [
+    "outbounds": [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+    ]
+}
+EOF
+    elif [[ "$type_id" =~ ^(4|5|6|7)$ ]]; then
+        # 针对包含 dokodemo-door 路由规则的专属配置
+        local routing_rules=""
+        if [[ "$type_id" == "4" || "$type_id" == "5" ]]; then
+            routing_rules=$(cat <<EOF
             {
                 "inboundTag": ["dokodemo-in"],
                 "domain": ["$sni"],
@@ -2867,151 +3078,51 @@ EOF
                 "inboundTag": ["dokodemo-in"],
                 "outboundTag": "block"
             }
+EOF
+)
+        elif [[ "$type_id" == "6" ]]; then
+            routing_rules=$(cat <<EOF
+            {
+                "type": "field",
+                "inboundTag": ["xray-xhttp-in"],
+                "outboundTag": "direct"
+            }
+EOF
+)
+        elif [[ "$type_id" == "7" ]]; then
+            routing_rules=$(cat <<EOF
+            {
+                "inboundTag": ["dokodemo-in"],
+                "domain": ["$sni"],
+                "outboundTag": "direct"
+            },
+            {
+                "inboundTag": ["dokodemo-in"],
+                "outboundTag": "block"
+            },
+            {
+                "inboundTag": ["xray-xhttp-in"],
+                "outboundTag": "direct"
+            }
+EOF
+)
+        fi
+        
+        cat > /usr/local/etc/xray/config.json << EOF
+{
+    "log": {"loglevel": "warning"},
+    "inbounds": [
+        $INBOUND_JSON
+    ],
+    "outbounds": [
+        {"protocol": "freedom", "tag": "direct"},
+        {"protocol": "blackhole", "tag": "block"}
+    ],
+    "routing": {
+        "rules": [
+$routing_rules
         ]
     }
-}
-EOF
-    elif [[ "$type_id" == "6" ]]; then
-        cat > /usr/local/etc/xray/config.json << EOF
-{
-    "log": {
-        "loglevel": "warning"
-    },
-  "inbounds": [
-    {
-      "tag": "ab-xhttp-in",
-      "listen": "0.0.0.0",
-      "port": $port,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "$uuid",
-            "flow": "",
-            "email": "ab-xhttp"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "$dest",
-          "serverNames": ["$sni"],
-          "privateKey": "$pk",
-          "shortIds": ["$sid"]
-        },
-        "xhttpSettings": {
-          "path": "$path",
-          "mode": "auto"
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom"
-    },
-    {
-      "tag": "block",
-      "protocol": "blackhole"
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "type": "field",
-        "inboundTag": ["ab-xhttp-in"],
-        "outboundTag": "direct"
-      }
-    ]
-  }
-}
-EOF
-    elif [[ "$type_id" == "7" ]]; then
-        cat > /usr/local/etc/xray/config.json << EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [
-    {
-      "tag": "dokodemo-in",
-      "port": $port,
-      "protocol": "dokodemo-door",
-      "settings": {
-        "address": "127.0.0.1",
-        "port": 8444,
-        "network": "tcp"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["tls"],
-        "routeOnly": true
-      }
-    },
-    {
-      "tag": "ab-xhttp-in",
-      "listen": "127.0.0.1",
-      "port": 8444,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "$uuid",
-            "flow": "",
-            "email": "ab-xhttp"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "$dest",
-          "serverNames": ["$sni"],
-          "privateKey": "$pk",
-          "shortIds": ["$sid"]
-        },
-        "xhttpSettings": {
-          "path": "$path",
-          "mode": "auto"
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "tag": "direct",
-      "protocol": "freedom"
-    },
-    {
-      "tag": "block",
-      "protocol": "blackhole"
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "inboundTag": ["dokodemo-in"],
-        "domain": ["$sni"],
-        "outboundTag": "direct"
-      },
-      {
-        "inboundTag": ["dokodemo-in"],
-        "outboundTag": "block"
-      },
-      {
-        "inboundTag": ["ab-xhttp-in"],
-        "outboundTag": "direct"
-      }
-    ]
-  }
 }
 EOF
     fi
@@ -3026,7 +3137,7 @@ EOF
         if systemctl is-active --quiet xray; then
             log_success "Xray 已成功启动，并在后台保持运行！"
         else
-            log_error "Xray 启动失败，请检查服务状态。"
+            log_error "Xray 启动失败，请检查服务状态或配置语法。"
         fi
     fi
 }
@@ -3480,11 +3591,16 @@ EOF
             fi
 
             case $x_choice in
-                4) build_xray_config "4" ;;
-                5) build_xray_config "5" ;;
-                6) build_xray_config "6" ;;
-                7) build_xray_config "7" ;;
-                *) log_warn "当前一键面板中 Xray 主要专精于 Reality 防偷跑与 xhttp (选项 4-7)。选项 $x_choice 暂不直接生成，请选择 4-7 或使用 sing-box 核心配置其他协议。"; sleep 2 ;;
+                1|2|3|4|5|6|7|8|9|10|11|12|13|14)
+                    build_xray_config "$x_choice"
+                    ;;
+                15)
+                    log_error "Xray-core 原生不支持 Hysteria2，请选择 sing-box 核心进行配置！"
+                    sleep 2
+                    ;;
+                *) 
+                    log_warn "无效的选项: $x_choice"; sleep 2 
+                    ;;
             esac
         fi
 
@@ -4351,62 +4467,131 @@ if os.path.exists(CONFIG_FILE_XR):
                 int_port = ib.get("settings", {}).get("port", 8444)
 
         for ib in xr_conf.get("inbounds", []):
-            if ib.get("protocol") == "vless":
-                clients = ib.get("settings", {}).get("clients", [])
+            protocol = ib.get("protocol")
+            if protocol == "dokodemo-door": continue
+
+            port = ib.get("port", ext_port)
+            tag = ib.get("tag", protocol)
+            settings = ib.get("settings", {})
+            stream = ib.get("streamSettings", {})
+
+            net = stream.get("network", "tcp")
+            sec = stream.get("security", "none")
+            
+            tls_settings = stream.get("tlsSettings", {})
+            real = stream.get("realitySettings", {})
+            
+            sni = tls_settings.get("serverName", "") or real.get("serverNames", [""])[0]
+            if not sni:
+                certs = tls_settings.get("certificates", [])
+                if certs: sni = SERVER_IP
+            if not sni: sni = SERVER_IP
+            
+            path = ""
+            if net == "ws": path = stream.get("wsSettings", {}).get("path", "")
+            elif net == "grpc": path = stream.get("grpcSettings", {}).get("serviceName", "")
+            elif net == "xhttp": path = stream.get("xhttpSettings", {}).get("path", "")
+
+            addr = sni if (sni and not is_ip(sni)) else SERVER_IP
+            p_port = ext_port if (str(ib.get("port")) == str(int_port) or ib.get("listen") == "127.0.0.1") else ib.get("port", 443)
+
+            if protocol == "vless":
+                clients = settings.get("clients", [])
                 if not clients: continue
                 uuid = clients[0].get("id", "")
                 flow = clients[0].get("flow", "")
-                email = clients[0].get("email", "xray-vless")
-                
-                display_tag = ib.get("tag", email)
-                
-                stream = ib.get("streamSettings", {})
-                net = stream.get("network", "tcp")
-                sec = stream.get("security", "none")
 
-                real = stream.get("realitySettings", {})
-                sni = real.get("serverNames", [""])[0]
                 sid = real.get("shortIds", [""])[0]
-
-                path = ""
-                if net == "xhttp":
-                    path = stream.get("xhttpSettings", {}).get("path", "")
-
                 pbk = ""
                 try:
                     with open("/usr/local/etc/xray/reality_pub.conf") as f:
                         for line in f:
-                            if line.startswith(f"{ext_port}:"):
+                            if line.startswith(f"{ext_port}:") or line.startswith(f"{p_port}:"):
                                 pbk = line.strip().split(":", 1)[1]
-                except:
-                    pass
-
-                p_port = ext_port if (str(ib.get("port")) == str(int_port) or ib.get("listen") == "127.0.0.1") else ib.get("port", 443)
-                addr = sni if (sni and not is_ip(sni)) else SERVER_IP
+                except: pass
 
                 params = f"encryption=none&security={sec}&sni={sni}&fp=chrome&type={net}&headerType=none"
                 if flow: params += f"&flow={flow}"
-                if sec == "reality":
-                    params += f"&pbk={urlencode(pbk)}&sid={sid}"
-                if net == "xhttp":
-                    params += f"&path={urlencode(path)}"
+                if sec == "reality": params += f"&pbk={urlencode(pbk)}&sid={sid}"
+                if net in ("ws", "grpc", "xhttp"): params += f"&path={urlencode(path)}"
 
-                link = f"vless://{uuid}@{addr}:{p_port}?{params}#{urlencode(display_tag)}"
+                link = f"vless://{uuid}@{addr}:{p_port}?{params}#{urlencode(tag)}"
                 links_xray.append(link)
 
                 cp = {
-                    'name': display_tag, 'type': 'vless', 'server': addr, 'port': p_port,
-                    'uuid': uuid, 'tls': True if sec == "reality" else False, 'servername': sni,
+                    'name': tag, 'type': 'vless', 'server': addr, 'port': p_port,
+                    'uuid': uuid, 'tls': True if sec in ["tls", "reality"] else False, 'servername': sni,
                     'network': net, 'udp': True
                 }
                 if flow: cp['flow'] = flow
-                if sec == "reality":
-                    cp['reality-opts'] = {'public-key': pbk, 'short-id': sid}
-                if net == 'xhttp':
-                    cp['xhttp-opts'] = {'path': path}
+                if sec == "reality": cp['reality-opts'] = {'public-key': pbk, 'short-id': sid}
+                if net == 'ws': cp['ws-opts'] = {'path': path, 'headers': {'Host': sni}}
+                if net == 'grpc': cp['grpc-opts'] = {'grpc-service-name': path}
+                if net == 'xhttp': cp['xhttp-opts'] = {'path': path}
                 clash_proxies.append(cp)
-                clash_proxy_names.append(display_tag)
+                clash_proxy_names.append(tag)
 
+            elif protocol == "vmess":
+                clients = settings.get("clients", [])
+                if not clients: continue
+                uuid = clients[0].get("id", "")
+                aid = clients[0].get("alterId", 0)
+
+                obj = {
+                    'v':'2','ps':tag,'add':addr,'port':str(p_port),
+                    'id':uuid,'aid':str(aid),'scy':'auto',
+                    'net':net,'type':'none','host':sni,
+                    'path':path,'tls':sec,'sni':sni,'fp':'chrome'
+                }
+                enc = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip('=')
+                links_xray.append(f"vmess://{enc}")
+
+                cp = {
+                    'name': tag, 'type': 'vmess', 'server': addr, 'port': p_port,
+                    'uuid': uuid, 'alterId': aid, 'cipher': 'auto',
+                    'tls': True if sec == "tls" else False, 'servername': sni, 'network': net, 'udp': True
+                }
+                if net == 'ws': cp['ws-opts'] = {'path': path, 'headers': {'Host': sni}}
+                clash_proxies.append(cp)
+                clash_proxy_names.append(tag)
+
+            elif protocol == "trojan":
+                clients = settings.get("clients", [])
+                if not clients: continue
+                pwd = clients[0].get("password", "")
+                
+                params = f"security={sec}&sni={sni}&type={net}"
+                if net in ("ws", "grpc"): params += f"&path={urlencode(path)}"
+                links_xray.append(f"trojan://{urlencode(pwd)}@{addr}:{p_port}?{params}#{urlencode(tag)}")
+
+                cp = {
+                    'name': tag, 'type': 'trojan', 'server': addr, 'port': p_port,
+                    'password': pwd, 'sni': sni, 'udp': True, 'network': net
+                }
+                if net == 'ws': cp['ws-opts'] = {'path': path, 'headers': {'Host': sni}}
+                if net == 'grpc': cp['grpc-opts'] = {'grpc-service-name': path}
+                clash_proxies.append(cp)
+                clash_proxy_names.append(tag)
+
+            elif protocol == "shadowsocks":
+                method = settings.get("method", "")
+                pwd = settings.get("password", "")
+                if method.startswith("2022-"):
+                    raw = f"{method}:{pwd}"
+                    info = base64.urlsafe_b64encode(raw.encode()).decode().rstrip('=')
+                    clash_pwd = pwd
+                else:
+                    info = base64.urlsafe_b64encode(f"{method}:{pwd}".encode()).decode().rstrip('=')
+                    clash_pwd = pwd
+
+                links_xray.append(f"ss://{info}@{addr}:{p_port}#{urlencode(tag)}")
+
+                cp = {
+                    'name': tag, 'type': 'ss', 'server': addr, 'port': p_port,
+                    'cipher': method, 'password': clash_pwd, 'udp': True
+                }
+                clash_proxies.append(cp)
+                clash_proxy_names.append(tag)
     except Exception as e:
         pass
 
@@ -4518,7 +4703,7 @@ run_all() {
     echo "将依次执行："
     echo "  1. 基础安全设置（SSH/BBR/fail2ban）"
     echo "  2. SSL 证书申请"
-    echo "  3. 安装代理内核 (sing-box)"
+    echo "  3. 安装代理内核 (sing-box / Xray)"
     echo "  4. 配置代理节点"
     echo "  5. 生成节点链接"
     echo ""
